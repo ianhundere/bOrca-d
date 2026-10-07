@@ -4,15 +4,15 @@
 # keeps no workflow, so workflow_dispatch has no Run button in the web UI;
 # start a manual run with `gh workflow run ci.yml --ref spec/borca-fixes`.
 #
-# The build and unsigned-char jobs run the same ./tool and tests/run.sh
-# commands a developer runs locally (tests/README.md lists them for the
-# uConsole). Two kinds of step need what the uConsole lacks: the --portmidi
-# builds need libportmidi-dev, and the armhf job needs the armhf cross
-# compiler. The runners' gcc can also differ from the device's; each job's
-# "Toolchain versions" step prints it.
+# The build and unsigned-char jobs run the same ./tool, tests/run.sh,
+# build/unit_tests and tests/check-*.sh commands a developer runs locally
+# (tests/README.md lists them for the uConsole). Two kinds of step need what
+# the uConsole lacks: the --portmidi builds need libportmidi-dev, and the
+# armhf job needs the armhf cross compiler. The runners' gcc can also differ
+# from the device's; each job's "Toolchain versions" step prints it.
 #
-# Later stories extend this file: P0.6 adds the unit-test, nm and include
-# checks, and P0.7 adds the --alsa builds.
+# Later stories extend this file: P0.7 adds the --alsa builds, including the
+# -d --alsa test build.
 name: CI
 
 on:
@@ -88,6 +88,51 @@ jobs:
       - name: Golden suite on the release cli
         run: tests/run.sh build/cli
 
+      # AD-2 and AD-1 over every file in ./tool sources core; the expected
+      # failures are listed in tests/xfail/. They need no build, so they run
+      # before the unit-test builds and a failing build cannot hide them.
+      - name: Core include allow-list check (with canary)
+        run: tests/check-includes.sh
+
+      - name: Core no-writable-globals check (nm, with canary)
+        run: tests/check-nm.sh
+
+      # The unit-test runner, in debug (ASan + UBSan). The runner makes UBSan
+      # halt at its first report, and the run steps also set halt_on_error,
+      # as tests/run.sh does for the goldens. The --portmidi build adds the
+      # PortMidi adapter tests and fails if it registers none; it writes the
+      # same build/debug/unit_tests, so each build is run before the next one
+      # replaces it.
+      - name: Build debug unit tests
+        run: CFLAGS_EXTRA=-Werror ./tool build -d test
+
+      - name: Unit tests (ASan + UBSan)
+        env:
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: build/debug/unit_tests
+
+      - name: Build debug unit tests with PortMidi
+        run: CFLAGS_EXTRA=-Werror ./tool build -d --portmidi test
+
+      # Fails unless the PortMidi adapter test actually ran, so a build in
+      # which FEAT_PORTMIDI never reaches the compiler cannot pass.
+      - name: Unit tests with the PortMidi adapter tests (ASan + UBSan)
+        env:
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: |
+          log="$RUNNER_TEMP/unit_tests_portmidi.log"
+          status=0
+          build/debug/unit_tests >"$log" 2>&1 || status=$?
+          cat "$log"
+          if [ "$status" != 0 ]; then
+            echo "unit_tests exited $status"
+            exit 1
+          fi
+          if ! grep -qx 'ok portmidi_error_text_and_filters' "$log"; then
+            echo "the PortMidi adapter test did not run"
+            exit 1
+          fi
+
       - name: Build debug orca
         run: CFLAGS_EXTRA=-Werror ./tool build -d orca
 
@@ -119,6 +164,34 @@ jobs:
       - name: Golden suite against the committed goldens
         run: tests/run.sh build/cli
 
+      - name: Build release unit tests with -funsigned-char
+        run: CFLAGS_EXTRA="-Werror -funsigned-char" ./tool build test
+
+      - name: Unit tests (release, unsigned char)
+        run: build/unit_tests
+
+      # The runner's failure path: with -DUNIT_TESTS_CANARY it registers a
+      # test whose check is false, and must report it and exit 1.
+      - name: Unit-test runner reports a failed check (canary)
+        run: |
+          CFLAGS_EXTRA="-Werror -DUNIT_TESTS_CANARY" ./tool build test
+          log="$RUNNER_TEMP/unit_tests_canary.log"
+          status=0
+          build/unit_tests >"$log" 2>&1 || status=$?
+          cat "$log"
+          if [ "$status" != 1 ]; then
+            echo "expected exit 1 from the canary build, got $status"
+            exit 1
+          fi
+          if ! grep -q '^FAIL unit_check_canary:' "$log"; then
+            echo "the runner did not report the canary's failed check"
+            exit 1
+          fi
+
+      # ubuntu-24.04 ships shellcheck (0.9.0); the arm image is not known to.
+      - name: Shellcheck the build and test scripts
+        run: shellcheck -s sh tool tests/run.sh tests/check-includes.sh tests/check-nm.sh
+
   # Optional compile-only check for 32-bit ARM (Pi Zero 2W), where Usz is
   # 32-bit. It calls the cross compiler directly instead of going through
   # tool, because tool picks -march from the host's uname -m and would hand
@@ -143,13 +216,19 @@ jobs:
       - name: Toolchain versions
         run: arm-linux-gnueabihf-gcc --version | head -n 1
 
-      # The file list duplicates tool's cli sources until P0.6 introduces the
-      # shared CORE list. Every file is compiled even after a failure, so one
-      # run reports them all.
+      # The files are the union of tool's cli and test source lists, so they
+      # follow the shared CORE list. The lists are read before the loop, so a
+      # failing ./tool sources fails the step instead of compiling nothing.
+      # Every file is compiled even after a failure, so one run reports them
+      # all.
       - name: Compile each source for armhf
         run: |
+          cli_files=$(./tool sources cli)
+          test_files=$(./tool sources test)
+          files=$(printf '%s\n' "$cli_files" "$test_files" | awk 'NF && !seen[$0]++')
+          test -n "$files"
           status=0
-          for f in gbuffer.c field.c vmio.c sim.c events_print.c cli_main.c; do
+          for f in $files; do
             echo "arm-linux-gnueabihf-gcc -c $f"
             arm-linux-gnueabihf-gcc -std=c99 -pipe -finput-charset=UTF-8 \
               -Wall -Wpedantic -Wextra -Wwrite-strings -Wconversion -Wshadow \

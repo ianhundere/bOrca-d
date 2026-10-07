@@ -8,9 +8,14 @@ Example:
     tool build --portmidi orca
 Commands:
     build <target>
-        Compiles the livecoding environment or the CLI tool.
-        Targets: orca, cli
-        Output: build/<target>
+        Compiles the livecoding environment, the CLI tool or the unit-test
+        runner.
+        Targets: orca, cli, test
+        Output: build/<target>, or build/unit_tests for test
+    sources <list>
+        Prints the source files of a build target, one per line, or the
+        shared CORE list of core modules that every target links.
+        Lists: core, cli, orca, test
     clean
         Removes build/
     info
@@ -38,9 +43,11 @@ Environment:
 Optional Features:
     --portmidi     Enable or disable hardware MIDI output support with
     --no-portmidi  PortMidi. Note: PortMidi has memory leaks and bugs.
+                   For the test target, also builds the PortMidi adapter
+                   tests.
                    Default: disabled.
     --mouse        Enable or disable mouse features in the livecoding
-    --no-mouse     environment.
+    --no-mouse     environment. The test target ignores them.
                    Default: enabled.
 EOF
 }
@@ -235,6 +242,90 @@ try_make_dir() {
 
 build_dir=build
 
+# The CORE list (architecture spine AD-1, AD-21): the core modules, which do
+# no I/O, read no clock and keep no writable globals. tick.c joins it when it
+# is extracted. Every build target links all of it, and tests/check-nm.sh and
+# tests/check-includes.sh check each file in it through './tool sources core',
+# so adding a core module edits only this line.
+core_sources='gbuffer.c vmio.c sim.c'
+
+# set_target_sources <core|cli|orca|test>: sets source_files to CORE followed
+# by the target's own files. Returns 1 for an unknown name.
+set_target_sources() {
+  source_files=
+  # Split on spaces intentionally; globbing is off (set -f).
+  # shellcheck disable=SC2086
+  add source_files $core_sources
+  case $1 in
+    core) ;;
+    cli) add source_files field.c events_print.c cli_main.c;;
+    orca|tui)
+      add source_files field.c osc_out.c term_util.c sysmisc.c \
+        thirdparty/oso.c tooltips.c tui_main.c
+    ;;
+    test)
+      # tests/unit/*.c without globbing, in a fixed order.
+      if ! [ -d tests/unit ]; then
+        fatal "tests/unit not found; run tool from the repository root"
+      fi
+      _unit_files=$(find tests/unit -type f -name '*.c' \
+        ! -path 'tests/unit/*/*' | LC_ALL=C sort)
+      # Split on newlines only.
+      _old_ifs=$IFS
+      IFS='
+'
+      # shellcheck disable=SC2086
+      add source_files $_unit_files
+      IFS=$_old_ifs
+    ;;
+    *) return 1;;
+  esac
+}
+
+# Sets brew_prefix to Homebrew's prefix on mac.
+find_brew_prefix() {
+  if ! brew_prefix=$(printenv HOMEBREW_PREFIX); then
+     brew_prefix=/usr/local
+  fi
+}
+
+# PortMidi, in two parts so that orca keeps its flag order: the include and
+# library dirs, which orca adds inside its OS block (on mac this needs
+# brew_prefix), and the library and FEAT_PORTMIDI, which it adds after the
+# curses libraries. The test target applies both.
+add_portmidi_dirs() {
+  if [ $portmidi_enabled != 1 ]; then return 0; fi
+  case $os in
+    mac)
+      portmidi_dir="$brew_prefix/opt/portmidi"
+      if ! [ -d "$portmidi_dir" ]; then
+        printf 'Error: PortMidi directory not found at %s\n' \
+          "$portmidi_dir" >&2
+        printf 'Install with: brew install portmidi\n' >&2
+        exit 1
+      fi
+      add libraries "-L$portmidi_dir/lib"
+      add cc_flags "-I$portmidi_dir/include"
+    ;;
+    bsd)
+      add libraries "-L/usr/local/lib"
+      add cc_flags "-I/usr/local/include"
+    ;;
+  esac
+}
+
+add_portmidi_libs() {
+  if [ $portmidi_enabled != 1 ]; then return 0; fi
+  add libraries -lportmidi
+  add cc_flags -DFEAT_PORTMIDI
+  if [ $config_mode = debug ]; then
+    cat >&2 <<EOF
+Warning: The PortMidi library contains code that may trigger address sanitizer
+in debug builds. These are probably not bugs in orca.
+EOF
+  fi
+}
+
 build_target() {
   cc_flags=
   libraries=
@@ -333,14 +424,14 @@ build_target() {
     ;;
   esac
 
-  add source_files gbuffer.c field.c vmio.c sim.c
+  case $1 in
+    cli|orca|tui|test) set_target_sources "$1";;
+  esac
   case $1 in
     cli)
-      add source_files events_print.c cli_main.c
       out_exe=cli
     ;;
     orca|tui)
-      add source_files osc_out.c term_util.c sysmisc.c thirdparty/oso.c tooltips.c tui_main.c
       add cc_flags -D_XOPEN_SOURCE_EXTENDED=1
       # thirdparty headers (like sokol_time.h) should get -isystem for their
       # include dir so that any warnings they generate with our warning flags
@@ -350,9 +441,7 @@ build_target() {
       out_exe=orca
       case $os in
         mac)
-          if ! brew_prefix=$(printenv HOMEBREW_PREFIX); then
-             brew_prefix=/usr/local
-          fi
+          find_brew_prefix
           ncurses_dir="$brew_prefix/opt/ncurses"
           if ! [ -d "$ncurses_dir" ]; then
             printf 'Error: ncurses directory not found at %s\n' \
@@ -365,25 +454,12 @@ build_target() {
           add libraries "-L$ncurses_dir/lib"
           add cc_flags "-I$ncurses_dir/include"
           # todo mach time stuff for mac?
-          if [ $portmidi_enabled = 1 ]; then
-            portmidi_dir="$brew_prefix/opt/portmidi"
-            if ! [ -d "$portmidi_dir" ]; then
-              printf 'Error: PortMidi directory not found at %s\n' \
-                "$portmidi_dir" >&2
-              printf 'Install with: brew install portmidi\n' >&2
-              exit 1
-            fi
-            add libraries "-L$portmidi_dir/lib"
-            add cc_flags "-I$portmidi_dir/include"
-          fi
+          add_portmidi_dirs
           # needed for using pbpaste instead of xclip
           add cc_flags -DORCA_OS_MAC
         ;;
         bsd)
-          if [ $portmidi_enabled = 1 ]; then
-            add libraries "-L/usr/local/lib"
-            add cc_flags "-I/usr/local/include"
-          fi
+          add_portmidi_dirs
         ;;
         *)
           # librt and high-res posix timers on Linux
@@ -411,23 +487,33 @@ build_target() {
       if [ $curses_flags = 0 ]; then
         add libraries -lncursesw -lformw
       fi
-      if [ $portmidi_enabled = 1 ]; then
-        add libraries -lportmidi
-        add cc_flags -DFEAT_PORTMIDI
-        if [ $config_mode = debug ]; then
-          cat >&2 <<EOF
-Warning: The PortMidi library contains code that may trigger address sanitizer
-in debug builds. These are probably not bugs in orca.
-EOF
-        fi
-      fi
+      add_portmidi_libs
       if [ $mouse_disabled = 1 ]; then
         add cc_flags -DFEAT_NOMOUSE
       fi
     ;;
+    test)
+      # The unit-test runner: CORE plus tests/unit/*.c, against libc only.
+      # Each adapter FEAT_ flag builds that adapter's tests, and the runner
+      # fails when a flag registers none. --no-mouse has no adapter tests and
+      # is ignored.
+      out_exe=unit_tests
+      case "$source_files
+" in
+        *'
+tests/unit/main.c
+'*) ;;
+        *) fatal "tests/unit/main.c (the unit-test runner) is missing";;
+      esac
+      if [ $os = mac ] && [ $portmidi_enabled = 1 ]; then
+        find_brew_prefix
+      fi
+      add_portmidi_dirs
+      add_portmidi_libs
+    ;;
     *)
       printf 'Unknown build target %s\nValid build targets: %s\n' \
-        "$1" 'orca, cli' >&2
+        "$1" 'orca, cli, test' >&2
       exit 1
     ;;
   esac
@@ -499,6 +585,21 @@ EOF
       exit 1
     fi
     build_target "$1"
+  ;;
+  sources)
+    test "$#" -lt 1 && fatal "Too few arguments for 'sources'"
+    test "$#" -gt 1 && fatal "Too many arguments for 'sources'"
+    if ! set_target_sources "$1"; then
+      printf 'Unknown source list %s\nValid source lists: %s\n' \
+        "$1" 'core, cli, orca, test' >&2
+      exit 1
+    fi
+    # add leaves a leading newline, so print the split fields, not the
+    # variable itself.
+    IFS='
+'
+    # shellcheck disable=SC2086
+    printf '%s\n' $source_files
   ;;
   clean)
     if [ -d "$build_dir" ]; then

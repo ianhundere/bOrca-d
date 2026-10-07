@@ -1,0 +1,8 @@
+# Expected failures of tests/check-nm.sh (architecture spine AD-1).
+# One line per file: <file> <item...>, naming the spec items the fix waits
+# for. The series that makes the file pass deletes its line in the same
+# commit; see tests/README.md.
+
+# sim.c keeps operator state, glide state and non-const tables in writable
+# statics: B1 moves the operator state out, B3 the glide state and tables.
+sim.c B1 B3
