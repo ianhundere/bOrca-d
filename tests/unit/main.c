@@ -14,12 +14,13 @@ typedef struct {
 
 static Unit_test const unit_tests[] = {
 #define X(name) {#name, test_##name},
-    CORE_TESTS(X) PORTMIDI_TESTS(X) CANARY_TESTS(X)
+    CORE_TESTS(X) PORTMIDI_TESTS(X) ALSA_TESTS(X) CANARY_TESTS(X)
 #undef X
 };
 
 #define COUNT(name) +1
 enum { portmidi_test_count = 0 PORTMIDI_TESTS(COUNT) };
+enum { alsa_test_count = 0 ALSA_TESTS(COUNT) };
 #undef COUNT
 
 static char const *current_test = "";
@@ -44,6 +45,10 @@ int main(void) {
 #ifdef FEAT_PORTMIDI
   if (portmidi_test_count == 0)
     empty_flag = "FEAT_PORTMIDI";
+#endif
+#ifdef FEAT_ALSA
+  if (alsa_test_count == 0)
+    empty_flag = "FEAT_ALSA";
 #endif
   if (empty_flag != NULL) {
     fprintf(stderr,

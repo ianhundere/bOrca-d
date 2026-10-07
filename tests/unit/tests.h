@@ -14,6 +14,7 @@
 // The full list for each adapter FEAT_ flag, and for the runner's failure
 // canary, whatever the flags.
 #define PORTMIDI_TESTS_ALL(X) X(portmidi_error_text_and_filters)
+#define ALSA_TESTS_ALL(X) X(alsa_version_and_open_modes)
 #define CANARY_TESTS_ALL(X) X(unit_check_canary)
 
 // Every test's prototype, generated from the lists and outside any #ifdef:
@@ -22,6 +23,7 @@
 #define UNIT_TEST_DECLARE(name) void test_##name(void);
 CORE_TESTS(UNIT_TEST_DECLARE)
 PORTMIDI_TESTS_ALL(UNIT_TEST_DECLARE)
+ALSA_TESTS_ALL(UNIT_TEST_DECLARE)
 CANARY_TESTS_ALL(UNIT_TEST_DECLARE)
 #undef UNIT_TEST_DECLARE
 
@@ -32,6 +34,11 @@ CANARY_TESTS_ALL(UNIT_TEST_DECLARE)
 #define PORTMIDI_TESTS(X) PORTMIDI_TESTS_ALL(X)
 #else
 #define PORTMIDI_TESTS(X)
+#endif
+#ifdef FEAT_ALSA
+#define ALSA_TESTS(X) ALSA_TESTS_ALL(X)
+#else
+#define ALSA_TESTS(X)
 #endif
 
 // -DUNIT_TESTS_CANARY adds a test whose check is false; CI uses it to prove

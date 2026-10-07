@@ -26,7 +26,9 @@ Options:
     -c <name>      Use a specific compiler binary. Default: \$CC, or cc
     -d             Build with debug features. Output changed to:
                    build/debug/<target>
-    --harden       Enable compiler safeguards like -fstack-protector.
+    --harden       Enable compiler safeguards: -fstack-protector-strong,
+                   and _FORTIFY_SOURCE set to 2, replacing any level the
+                   compiler predefines (Ubuntu's gcc predefines 3).
                    You should probably do this if you plan to give the
                    compiled binary to other people.
     --static       Build static binary.
@@ -41,6 +43,14 @@ Environment:
                    on spaces, so a single flag cannot contain a space.
                    Example: CFLAGS_EXTRA=-Werror ./tool build cli
 Optional Features:
+    --alsa         Enable or disable native ALSA sequencer MIDI output
+    --no-alsa      (Linux only): an ALSA client named bOrca, or
+                   \$BORCA_ALSA_CLIENT_NAME when set and non-empty, with one
+                   port named MIDI out. Cannot be combined with --portmidi
+                   or --static. Needs libasound (Debian and Ubuntu:
+                   libasound2-dev). For the test target, also builds the
+                   ALSA adapter tests.
+                   Default: disabled.
     --portmidi     Enable or disable hardware MIDI output support with
     --no-portmidi  PortMidi. Note: PortMidi has memory leaks and bugs.
                    For the test target, also builds the PortMidi adapter
@@ -100,6 +110,7 @@ stats_enabled=0
 pie_enabled=0
 static_enabled=0
 portmidi_enabled=0
+alsa_enabled=0
 mouse_disabled=0
 config_mode=release
 
@@ -111,6 +122,8 @@ while getopts c:dhsv-: opt_val; do
          static) static_enabled=1;;
          pie) pie_enabled=1;;
          portmidi) portmidi_enabled=1;;
+         alsa) alsa_enabled=1;;
+         no-alsa|noalsa) alsa_enabled=0;;
          no-portmidi|noportmidi) portmidi_enabled=0;;
          mouse) mouse_disabled=0;;
          no-mouse|nomouse) mouse_disabled=1;;
@@ -326,7 +339,26 @@ EOF
   fi
 }
 
+# ALSA (architecture spine AD-17): Linux only, and a build has at most one
+# hardware MIDI backend, so --alsa excludes --portmidi. Debian and Ubuntu ship
+# no static libasound, so --alsa excludes --static too.
+check_alsa_option() {
+  if [ $alsa_enabled != 1 ]; then return 0; fi
+  [ "$os" = linux ] || fatal "Native ALSA requires Linux"
+  [ $portmidi_enabled = 0 ] || fatal "Choose ALSA or PortMidi"
+  [ $static_enabled = 0 ] || fatal "Native ALSA cannot be built with --static"
+}
+
+# The ALSA library and FEAT_ALSA, which orca adds after the curses libraries
+# and the test target applies.
+add_alsa_libs() {
+  if [ $alsa_enabled != 1 ]; then return 0; fi
+  add libraries -lasound
+  add cc_flags -DFEAT_ALSA
+}
+
 build_target() {
+  check_alsa_option
   cc_flags=
   libraries=
   source_files=
@@ -353,7 +385,9 @@ build_target() {
     add cc_flags "-fuse-ld=$lld_name"
   fi
   if [ $protections_enabled = 1 ]; then
-    add cc_flags -D_FORTIFY_SOURCE=2 -fstack-protector-strong
+    # Some compilers (Ubuntu's gcc) predefine _FORTIFY_SOURCE, and redefining
+    # it without -U first is a warning, an error under -Werror.
+    add cc_flags -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=2 -fstack-protector-strong
   fi
   if [ $pie_enabled = 1 ]; then
     add cc_flags -pie -fpie -Wl,-pie
@@ -487,6 +521,7 @@ build_target() {
       if [ $curses_flags = 0 ]; then
         add libraries -lncursesw -lformw
       fi
+      add_alsa_libs
       add_portmidi_libs
       if [ $mouse_disabled = 1 ]; then
         add cc_flags -DFEAT_NOMOUSE
@@ -509,6 +544,7 @@ tests/unit/main.c
         find_brew_prefix
       fi
       add_portmidi_dirs
+      add_alsa_libs
       add_portmidi_libs
     ;;
     *)

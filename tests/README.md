@@ -112,11 +112,27 @@ link all of it, and `./tool sources <core|cli|orca|test>` prints a list, one
 file per line, so the checks below and the CI `armhf` job read the same lists.
 
 Adapter `FEAT_` flags apply to `test` as they do to `orca`: `--portmidi`
-builds the PortMidi adapter tests (`--alsa` arrives with P0.7), and
-`--no-mouse`, which has no adapter, is ignored. A build that sets a flag but
-registers no test for it fails at run time with a message naming the flag.
+builds the PortMidi adapter tests, `--alsa` builds the ALSA adapter tests,
+and `--no-mouse`, which has no adapter, is ignored. A build that sets a flag
+but registers no test for it fails at run time with a message naming the
+flag. The adapter lists in `tests/unit/tests.h` today:
+
+| Flag | List | Tests |
+| --- | --- | --- |
+| `--portmidi` (`FEAT_PORTMIDI`) | `PORTMIDI_TESTS_ALL` | `portmidi_error_text_and_filters`: `Pm_GetErrorText` returns text; the clock, play and song-position filter bits are set and disjoint |
+| `--alsa` (`FEAT_ALSA`, Linux only) | `ALSA_TESTS_ALL` | `alsa_version_and_open_modes`: `snd_asoundlib_version()` is non-empty; `SND_SEQ_OPEN_DUPLEX` is `SND_SEQ_OPEN_OUTPUT \| SND_SEQ_OPEN_INPUT`; `SND_SEQ_NONBLOCK` is non-zero |
+
 The PortMidi build needs `libportmidi-dev`, so it runs in CI only, not on
-the uConsole. `-DUNIT_TESTS_CANARY` (through `CFLAGS_EXTRA`) adds
+the uConsole. The ALSA build needs `libasound2-dev`, which the uConsole has;
+its test opens no sequencer, so it also runs where `/dev/snd/seq` is
+missing, as on the CI runners:
+
+```sh
+CFLAGS_EXTRA=-Werror nice -n 19 taskset -c 0-2 ./tool build -d --alsa test
+UBSAN_OPTIONS=halt_on_error=1 nice -n 19 taskset -c 0-2 build/debug/unit_tests
+```
+
+`-DUNIT_TESTS_CANARY` (through `CFLAGS_EXTRA`) adds
 `unit_check_canary`, a test whose check is false; CI uses it to prove the
 runner reports a failure and exits 1. `./tool build test` stops with an
 error if `tests/unit/main.c`, the runner, is missing.
@@ -131,10 +147,11 @@ error if `tests/unit/main.c`, the runner, is missing.
    continue. Never use `assert`: release builds define `NDEBUG`, which
    removes it.
 3. In `tests/unit/tests.h`, add `X(<name>)` to `CORE_TESTS`, or to the full
-   list for its adapter flag (`PORTMIDI_TESTS_ALL`). `tests.h` generates
-   every test's prototype from these lists, outside any `#ifdef`, and makes
-   `-Wmissing-prototypes` an error, so a `test_<name>` that no list names
-   fails to build instead of never running. Make helper functions `static`.
+   list for its adapter flag (`PORTMIDI_TESTS_ALL`, `ALSA_TESTS_ALL`).
+   `tests.h` generates every test's prototype from these lists, outside any
+   `#ifdef`, and makes `-Wmissing-prototypes` an error, so a `test_<name>`
+   that no list names fails to build instead of never running. Make helper
+   functions `static`.
 4. An adapter test sits inside `#ifdef FEAT_<flag>` in its file and may
    include that backend's header; a core test includes only core headers and
    libc. The declarations in `tests.h` keep a file whose flag is off from
@@ -220,11 +237,20 @@ count results, so one file can add several.
   debug and release `cli` with `CFLAGS_EXTRA=-Werror` and runs the golden
   suite on both. It then runs `tests/check-includes.sh` and
   `tests/check-nm.sh`, which need no build, builds and runs the debug unit
-  tests without and with `--portmidi` (ASan, UBSan with `halt_on_error=1`;
-  the `--portmidi` run fails unless it prints
-  `ok portmidi_error_text_and_filters`), and builds the debug `orca`, the
-  debug `orca` with PortMidi (`make debug`), the release `orca` without
-  mouse support and the release `orca` with PortMidi, all with `-Werror`.
+  tests without and with `--portmidi` and with `--alsa` (ASan, UBSan with
+  `halt_on_error=1`; the `--portmidi` run fails unless it prints
+  `ok portmidi_error_text_and_filters`, the `--alsa` run unless it prints
+  `ok alsa_version_and_open_modes`). It checks that `tool` refuses
+  `--alsa --portmidi` with `Choose ALSA or PortMidi`, then builds the debug
+  `orca`, the debug `orca` with PortMidi (`make debug`) and with ALSA, the
+  release `orca` without mouse support, the release `orca` with PortMidi,
+  the release `orca` with ALSA and `-DBORCA_DEBUG_COUNTERS`, the release
+  `orca` with ALSA and the appliance `orca` (`make appliance`, which is
+  `--alsa --harden --pie`), all with `-Werror`. The plain ALSA and appliance
+  binaries must list `libasound.so.2` as `NEEDED` in `readelf -d`; the
+  appliance binary must also be of type `DYN` in `readelf -h` (PIE) and
+  import `__stack_chk_fail` in `nm -D --undefined-only` (hardened). Both
+  runners install `libasound2-dev` for the ALSA builds.
 - **unsigned-char** (`ubuntu-24.04`): runs the golden suite on a release
   `cli`, and the release unit tests, both built with `-funsigned-char`;
   checks that a release runner built with `-DUNIT_TESTS_CANARY` exits 1 and
@@ -248,9 +274,29 @@ CFLAGS_EXTRA=-Werror nice -n 19 taskset -c 0-2 ./tool build -d test
 UBSAN_OPTIONS=halt_on_error=1 nice -n 19 taskset -c 0-2 build/debug/unit_tests
 CFLAGS_EXTRA=-Werror nice -n 19 taskset -c 0-2 ./tool build test
 nice -n 19 taskset -c 0-2 build/unit_tests
+CFLAGS_EXTRA=-Werror nice -n 19 taskset -c 0-2 ./tool build -d --alsa test
+UBSAN_OPTIONS=halt_on_error=1 nice -n 19 taskset -c 0-2 build/debug/unit_tests
 CFLAGS_EXTRA=-Werror nice -n 19 taskset -c 0-2 ./tool build -d orca
 CFLAGS_EXTRA=-Werror nice -n 19 taskset -c 0-2 ./tool build --no-mouse orca
+CFLAGS_EXTRA=-Werror nice -n 19 taskset -c 0-2 ./tool build -d --alsa orca
+CFLAGS_EXTRA="-Werror -DBORCA_DEBUG_COUNTERS" nice -n 19 taskset -c 0-2 ./tool build --alsa orca
+CFLAGS_EXTRA=-Werror nice -n 19 taskset -c 0-2 ./tool build --alsa orca
+CFLAGS_EXTRA=-Werror nice -n 19 taskset -c 0-2 make appliance
 ```
+
+`-DBORCA_DEBUG_COUNTERS`, passed through `CFLAGS_EXTRA`, is a development
+switch for `--alsa` builds: the ALSA output also counts the messages it drops
+on `EAGAIN` or `EINTR`, and on quit, after the screen closes, prints
+`bOrca ALSA: <n> MIDI sends dropped on EAGAIN/EINTR, <m> not sent in all` to
+stderr (`<m>` counts every message that did not go out). It is never part of
+a release or appliance build; CI only compiles it.
+
+Building an `--alsa` `orca` is safe while the appliance runs; running one is
+not, unless it uses another client name: the appliance router refuses to
+route two `bOrca` clients. Run a test build with
+`BORCA_ALSA_CLIENT_NAME=bOrca-test` (any name but `bOrca`), a scratch
+`XDG_CONFIG_HOME` and a copy of a patch, or stop `borca-tty.service` first
+with Ian's approval.
 
 On aarch64 plain `char` is already unsigned, so the release `cli` and
 release unit-test runs above cover the `unsigned-char` job. The x86_64

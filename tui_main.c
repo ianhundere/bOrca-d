@@ -19,6 +19,21 @@
 #include <portmidi.h>
 #endif
 
+#ifdef FEAT_ALSA
+#include <alsa/asoundlib.h>
+#include <errno.h>
+#include <signal.h>
+#include <time.h>
+
+// SIGTERM, SIGHUP and SIGINT quit gracefully in --alsa builds: the handler
+// only sets this flag, which the event loop checks (architecture spine AD-3).
+static volatile sig_atomic_t alsa_shutdown_requested;
+static void alsa_request_shutdown(int signo) {
+  (void)signo;
+  alsa_shutdown_requested = 1;
+}
+#endif
+
 #if NCURSES_VERSION_PATCH < 20081122
 int _nc_has_mouse(void);
 #define has_mouse _nc_has_mouse
@@ -56,7 +71,22 @@ fprintf(stderr,
 "        Set MIDI to be sent via OSC formatted for Plogue Bidule.\n"
 "        The path argument is the path of the Plogue OSC MIDI device.\n"
 "        Example: /OSC_MIDI_0/MIDI\n"
-);} // clang-format on
+);
+#ifdef FEAT_ALSA
+fprintf(stderr,
+"\n"
+"ALSA MIDI output (this build):\n"
+"    MIDI goes out through an ALSA sequencer client named bOrca, or\n"
+"    $BORCA_ALSA_CLIENT_NAME when that is set and non-empty, with one\n"
+"    port named MIDI out. The client opens at startup even with\n"
+"    --osc-midi-bidule, whose output then replaces it. If the sequencer\n"
+"    cannot be opened, or another client still has the name after 1 s,\n"
+"    orca exits with status 1. SIGTERM, SIGHUP and SIGINT quit cleanly,\n"
+"    stopping playback first, unless the signal was already ignored when\n"
+"    orca started.\n"
+);
+#endif
+} // clang-format on
 
 typedef enum {
   Glyph_class_unknown,
@@ -464,9 +494,9 @@ staticni void draw_hud(WINDOW *win, int win_y, int win_x, int height, int width,
                        Usz ruler_spacing_y, Usz ruler_spacing_x, Usz tick_num,
                        Usz bpm, Ged_cursor const *ged_cursor,
                        Ged_input_mode input_mode, Usz activity_counter,
-                       Glyph const *gbuffer, Mark const *mbuffer) {
+                       Glyph const *gbuffer, Mark const *mbuffer,
+                       bool midi_err) {
   (void)height;
-  (void)width;
   enum { Tabstop = 8 };
   wmove(win, win_y, win_x);
   wprintw(win, "%zux%zu", field_w, field_h);
@@ -478,6 +508,17 @@ staticni void draw_hud(WINDOW *win, int win_y, int win_x, int height, int width,
   wprintw(win, "%zu", bpm);
   advance_faketab(win, win_x, Tabstop);
   print_activity_indicator(win, activity_counter);
+  // Where the MIDI err field goes, if a send has failed; it is drawn last.
+  // The indicator is drawn with waddchnstr, which leaves the cursor on its
+  // first column, so step past its 7 columns (Segments in
+  // print_activity_indicator) before moving to the next tab stop.
+  {
+    enum { Indicator_width = 7 };
+    int past_indicator = getcurx(win) + Indicator_width;
+    wmove(win, win_y, past_indicator < width ? past_indicator : width - 1);
+  }
+  advance_faketab(win, win_x, Tabstop);
+  int midi_err_x = getcurx(win);
   wmove(win, win_y + 1, win_x);
   wprintw(win, "%zu,%zu", ged_cursor->x, ged_cursor->y);
   advance_faketab(win, win_x, Tabstop);
@@ -543,6 +584,23 @@ staticni void draw_hud(WINDOW *win, int win_y, int win_x, int height, int width,
       wmove(win, win_height - 3, tooltip_x);
       wattrset(win, A_reverse);
       waddstr(win, enhanced_tooltip.line1);
+      wattrset(win, A_normal);
+    }
+  }
+  if (midi_err) {
+    // Sticky until quit. Drawn after the tooltip, which can share this line,
+    // and pulled left to fit a narrow window, so neither can hide it.
+    static char const midi_err_text[] = "MIDI err";
+    int text_len = (int)sizeof midi_err_text - 1;
+    int x = midi_err_x;
+    if (x > width - text_len)
+      x = width - text_len;
+    if (x < 0)
+      x = 0;
+    if (x < width) {
+      wmove(win, win_y, x);
+      wattrset(win, A_bold);
+      waddnstr(win, midi_err_text, width - x);
       wattrset(win, A_normal);
     }
   }
@@ -776,6 +834,9 @@ staticni bool ged_resize_grid_snap_ruler(Field *field, Mbuf_reusable *mbr,
 typedef enum {
   Midi_mode_type_null,
   Midi_mode_type_osc_bidule,
+#ifdef FEAT_ALSA
+  Midi_mode_type_alsa,
+#endif
 #ifdef FEAT_PORTMIDI
   Midi_mode_type_portmidi,
 #endif
@@ -789,6 +850,137 @@ typedef struct {
   Midi_mode_type type;
   char const *path;
 } Midi_mode_osc_bidule;
+
+#ifdef FEAT_ALSA
+// The shell's ALSA sequencer context (architecture spine AD-17): one
+// nonblocking client per process, opened before initscr in every --alsa
+// build, independent of Midi_mode. The alsa Midi_mode variant borrows it, and
+// only quit closes it. The send path sees the Midi_mode as const, so the
+// counters live here, reached through the variant's pointer.
+typedef struct {
+  snd_seq_t *seq;
+  int port; // "MIDI out"
+  // Sends that did not go out, dropped or failed; saturating. Nonzero shows
+  // the sticky "MIDI err" field on the HUD.
+  Usz send_failures;
+#ifdef BORCA_DEBUG_COUNTERS
+  // Of those, the sends dropped on -EAGAIN or -EINTR. Printed to stderr after
+  // endwin.
+  Usz send_drops;
+#endif
+} Alsa_ctx;
+
+// The client name: bOrca, or $BORCA_ALSA_CLIENT_NAME when it is set and
+// non-empty.
+static char const *alsa_client_name(void) {
+  char const *name = getenv("BORCA_ALSA_CLIENT_NAME");
+  return name && *name ? name : "bOrca";
+}
+
+// Returns 1 if a client other than seq's own is named name, 0 if none is, or
+// a negative ALSA error code.
+staticni int alsa_client_name_taken(snd_seq_t *seq, char const *name) {
+  snd_seq_client_info_t *info;
+  int err = snd_seq_client_info_malloc(&info);
+  if (err < 0)
+    return err;
+  int own = snd_seq_client_id(seq);
+  int taken = 0;
+  snd_seq_client_info_set_client(info, -1);
+  while (snd_seq_query_next_client(seq, info) >= 0) {
+    if (snd_seq_client_info_get_client(info) != own &&
+        strcmp(snd_seq_client_info_get_name(info), name) == 0) {
+      taken = 1;
+      break;
+    }
+  }
+  snd_seq_client_info_free(info);
+  return taken;
+}
+
+// Opens the client named alsa_client_name(), with one port "MIDI out" that
+// others can read and subscribe to. The appliance's router and verify match
+// this name, port and capability set exactly. Returns 0, -EEXIST if another
+// client already has the name, or another negative ALSA error code, with
+// nothing left open.
+staticni int alsa_ctx_open(Alsa_ctx *ctx) {
+  *ctx = (Alsa_ctx){.seq = NULL, .port = -1};
+  snd_seq_t *seq;
+  int err =
+      snd_seq_open(&seq, "default", SND_SEQ_OPEN_OUTPUT, SND_SEQ_NONBLOCK);
+  if (err < 0)
+    return err;
+  char const *client_name = alsa_client_name();
+  // Two clients with one name make the appliance router refuse to route
+  // either, so never take a name in use. A previous instance may still be
+  // exiting (a service restart): re-check every 100 ms for up to 1 s. This
+  // runs once, at startup.
+  for (int tries = 0;; ++tries) {
+    err = alsa_client_name_taken(seq, client_name);
+    if (err < 0)
+      goto fail;
+    if (err == 0)
+      break;
+    if (tries == 10) {
+      err = -EEXIST;
+      goto fail;
+    }
+    struct timespec pause = {0, 100 * 1000 * 1000};
+    nanosleep(&pause, NULL);
+  }
+  err = snd_seq_set_client_name(seq, client_name);
+  if (err < 0)
+    goto fail;
+  err = snd_seq_create_simple_port(
+      seq, "MIDI out", SND_SEQ_PORT_CAP_READ | SND_SEQ_PORT_CAP_SUBS_READ,
+      SND_SEQ_PORT_TYPE_MIDI_GENERIC | SND_SEQ_PORT_TYPE_APPLICATION);
+  if (err < 0)
+    goto fail;
+  ctx->seq = seq;
+  ctx->port = err;
+  return 0;
+fail:
+  snd_seq_close(seq);
+  return err;
+}
+
+staticni void alsa_ctx_close(Alsa_ctx *ctx) {
+  if (ctx->seq)
+    snd_seq_close(ctx->seq);
+  ctx->seq = NULL;
+}
+
+// After initscr, libasound's default error handler would print over the
+// screen; this one discards the message. Failed sends still show through the
+// MIDI err field.
+static void alsa_silent_error_handler(char const *file, int line,
+                                      char const *function, int err,
+                                      char const *fmt, ...) {
+  (void)file;
+  (void)line;
+  (void)function;
+  (void)err;
+  (void)fmt;
+}
+
+// Counts a send that did not go out. Never sleeps, retries or prints.
+static void alsa_ctx_count_send_failure(Alsa_ctx *ctx, int err) {
+#ifdef BORCA_DEBUG_COUNTERS
+  if (err == -EAGAIN || err == -EINTR)
+    ++ctx->send_drops;
+#else
+  (void)err;
+#endif
+  if (ctx->send_failures < SIZE_MAX)
+    ++ctx->send_failures;
+}
+
+typedef struct {
+  Midi_mode_type type;
+  Alsa_ctx *ctx;             // borrowed; only quit closes it
+  snd_midi_event_t *encoder; // owned by this variant
+} Midi_mode_alsa;
+#endif
 
 #ifdef FEAT_PORTMIDI
 typedef struct {
@@ -804,12 +996,37 @@ static bool portmidi_is_initialized = false;
 typedef union {
   Midi_mode_any any;
   Midi_mode_osc_bidule osc_bidule;
+#ifdef FEAT_ALSA
+  Midi_mode_alsa alsa;
+#endif
 #ifdef FEAT_PORTMIDI
   Midi_mode_portmidi portmidi;
 #endif
 } Midi_mode;
 
 void midi_mode_init_null(Midi_mode *mm) { mm->any.type = Midi_mode_type_null; }
+#ifdef FEAT_ALSA
+// Borrows ctx, which must stay open until the variant is deinitialized.
+// Returns 0, or a negative ALSA error code with mm unchanged.
+staticni int midi_mode_init_alsa(Midi_mode *mm, Alsa_ctx *ctx) {
+  snd_midi_event_t *encoder;
+  int err = snd_midi_event_new(16, &encoder);
+  if (err < 0)
+    return err;
+  mm->alsa = (Midi_mode_alsa){
+      .type = Midi_mode_type_alsa, .ctx = ctx, .encoder = encoder};
+  return 0;
+}
+#endif
+// Whether a MIDI send has failed since startup. Sticky until quit.
+static bool midi_mode_send_failed(Midi_mode const *mm) {
+#ifdef FEAT_ALSA
+  if (mm->any.type == Midi_mode_type_alsa)
+    return mm->alsa.ctx->send_failures != 0;
+#endif
+  (void)mm;
+  return false;
+}
 void midi_mode_init_osc_bidule(Midi_mode *mm, char const *path) {
   mm->osc_bidule.type = Midi_mode_type_osc_bidule;
   mm->osc_bidule.path = path;
@@ -896,6 +1113,12 @@ static bool portmidi_find_name_of_device_id(PmDeviceID id, PmError *out_pmerror,
 #endif
 staticni void midi_mode_deinit(Midi_mode *mm) {
   switch (mm->any.type) {
+#ifdef FEAT_ALSA
+  case Midi_mode_type_alsa:
+    // The context is borrowed: only quit closes it.
+    snd_midi_event_free(mm->alsa.encoder);
+    break;
+#endif
   case Midi_mode_type_null:
   case Midi_mode_type_osc_bidule:
     break;
@@ -1014,6 +1237,35 @@ static bool ged_is_draw_dirty(Ged *a) {
 staticni void send_midi_3bytes(Oosc_dev *oosc_dev, Midi_mode const *midi_mode,
                                int status, int byte1, int byte2) {
   switch (midi_mode->any.type) {
+#ifdef FEAT_ALSA
+  case Midi_mode_type_alsa: {
+    Alsa_ctx *ctx = midi_mode->alsa.ctx;
+    snd_midi_event_t *encoder = midi_mode->alsa.encoder;
+    unsigned char bytes[3] = {(unsigned char)status, (unsigned char)byte1,
+                              (unsigned char)byte2};
+    long length = status >= 0xf8 ? 1 : ((status & 0xe0) == 0xc0 ? 2 : 3);
+    snd_seq_event_t event;
+    snd_seq_ev_clear(&event);
+    snd_midi_event_reset_encode(encoder);
+    if (snd_midi_event_encode(encoder, bytes, length, &event) > 0 &&
+        event.type != SND_SEQ_EVENT_NONE) {
+      snd_seq_ev_set_source(&event, (unsigned char)ctx->port);
+      snd_seq_ev_set_subs(&event);
+      snd_seq_ev_set_direct(&event);
+      // No subscribers is normal; direct nonblocking output survives hotplug.
+      // A full output (-EAGAIN) or an interrupted write (-EINTR) drops the
+      // message, with no sleep or retry, like any other failure; the HUD
+      // shows it. Nothing prints here: curses owns the terminal.
+      int err = snd_seq_event_output_direct(ctx->seq, &event);
+      if (err < 0)
+        alsa_ctx_count_send_failure(ctx, err);
+    } else {
+      // The encoder failed or made no event: the message is dropped too.
+      alsa_ctx_count_send_failure(ctx, -EINVAL);
+    }
+    break;
+  }
+#endif
   case Midi_mode_type_null:
     break;
   case Midi_mode_type_osc_bidule: {
@@ -1511,7 +1763,8 @@ staticni void ged_draw(Ged *a, WINDOW *win, char const *filename,
     draw_hud(win, a->grid_h, hud_x, Hud_height, win_w, filename,
              a->field.height, a->field.width, a->ruler_spacing_y,
              a->ruler_spacing_x, a->tick_num, a->bpm, &a->ged_cursor,
-             a->input_mode, a->activity_counter, a->field.buffer, a->mbuf_r.buffer);
+             a->input_mode, a->activity_counter, a->field.buffer, a->mbuf_r.buffer,
+             midi_mode_send_failed(&a->midi_mode));
   }
   if (a->draw_event_list)
     draw_oevent_list(win, &a->oevent_list);
@@ -2709,6 +2962,10 @@ staticni void tui_save_prefs(Tui *t) {
   ezconf_w_start(&ez, optsbuff, ORCA_ARRAY_COUNTOF(optsbuff), conf_file_name);
   oso *midi_output_device_name = NULL;
   switch (t->ged.midi_mode.any.type) {
+#ifdef FEAT_ALSA
+  case Midi_mode_type_alsa:
+    break;
+#endif
   case Midi_mode_type_null:
     break;
   case Midi_mode_type_osc_bidule:
@@ -3419,9 +3676,49 @@ int main(int argc, char **argv) {
     fprintf(stderr, "Expected only 1 file argument.\n");
     exit(1);
   }
+#ifdef FEAT_ALSA
+  // The one ALSA client, opened before curses starts so that a failure can
+  // still be reported on stderr.
+  Alsa_ctx alsa_ctx;
+  {
+    int err = alsa_ctx_open(&alsa_ctx);
+    if (err == -EEXIST) {
+      fprintf(stderr,
+              "Cannot start: an ALSA client named '%s' is already running "
+              "(set BORCA_ALSA_CLIENT_NAME to run another instance)\n",
+              alsa_client_name());
+      osofree(t.file_name);
+      osofree(t.osc_midi_bidule_path);
+      return 1;
+    }
+    if (err < 0) {
+      fprintf(stderr, "Cannot initialize bOrca ALSA source: %s\n",
+              snd_strerror(err));
+      osofree(t.file_name);
+      osofree(t.osc_midi_bidule_path);
+      return 1;
+    }
+  }
+#endif
   qnav_init(); // Initialize the menu/navigation global state
   // Initialize the 'Grid EDitor' stuff. This sits underneath the TUI.
   ged_init(&t.ged, (Usz)t.undo_history_limit, (Usz)init_bpm, (Usz)init_seed);
+#ifdef FEAT_ALSA
+  // MIDI goes out through the ALSA client, unless --osc-midi-bidule takes
+  // the output below; the client then stays open and its port sends nothing.
+  if (osolen(t.osc_midi_bidule_path) == 0) {
+    int err = midi_mode_init_alsa(&t.ged.midi_mode, &alsa_ctx);
+    if (err < 0) {
+      fprintf(stderr, "Cannot initialize bOrca ALSA source: %s\n",
+              snd_strerror(err));
+      ged_deinit(&t.ged);
+      alsa_ctx_close(&alsa_ctx);
+      osofree(t.file_name);
+      osofree(t.osc_midi_bidule_path);
+      return 1;
+    }
+  }
+#endif
   // This will need to be changed to work with conf/menu
   if (osolen(t.osc_midi_bidule_path) > 0) {
     midi_mode_deinit(&t.ged.midi_mode);
@@ -3434,6 +3731,46 @@ int main(int argc, char **argv) {
   // consoles unless using libncursesw.
   setlocale(LC_ALL, "");
   initscr(); // Initialize ncurses
+#ifdef FEAT_ALSA
+  // Nothing prints to stderr while curses owns the terminal.
+  snd_lib_error_set_handler(alsa_silent_error_handler);
+  // After initscr, which installs its own SIGTERM and SIGINT handlers (they
+  // exit without stopping playback); SIGHUP it leaves alone. A signal that
+  // was ignored when orca started (nohup, a supervisor) stays ignored, as
+  // ncurses leaves it.
+  {
+    static int const shutdown_signals[] = {SIGTERM, SIGHUP, SIGINT};
+    struct sigaction shutdown_action = {0};
+    shutdown_action.sa_handler = alsa_request_shutdown;
+    sigemptyset(&shutdown_action.sa_mask);
+    bool signals_ok = true;
+    for (Usz i = 0; i < ORCA_ARRAY_COUNTOF(shutdown_signals); ++i) {
+      struct sigaction old_action;
+      if (sigaction(shutdown_signals[i], NULL, &old_action) < 0) {
+        signals_ok = false;
+        break;
+      }
+      if (old_action.sa_handler == SIG_IGN)
+        continue;
+      if (sigaction(shutdown_signals[i], &shutdown_action, NULL) < 0) {
+        signals_ok = false;
+        break;
+      }
+    }
+    if (!signals_ok) {
+      int sig_errno = errno;
+      endwin();
+      snd_lib_error_set_handler(NULL);
+      fprintf(stderr, "Cannot install bOrca shutdown handlers: %s\n",
+              strerror(sig_errno));
+      ged_deinit(&t.ged);
+      alsa_ctx_close(&alsa_ctx);
+      osofree(t.file_name);
+      osofree(t.osc_midi_bidule_path);
+      return 1;
+    }
+  }
+#endif
   // Allow ncurses to control newline translation. Fine to use with any modern
   // terminal, and will let ncurses run faster.
   nonl();
@@ -3513,9 +3850,18 @@ int main(int argc, char **argv) {
                             t.ged.field.width);
   ged_make_cursor_visible(&t.ged);
   ged_send_osc_bpm(&t.ged, (I32)t.ged.bpm); // Send initial BPM
+#ifdef FEAT_ALSA
+  // A shutdown signal before auto-play quits without starting playback.
+  if (alsa_shutdown_requested)
+    goto quit;
+#endif
   ged_set_playing(&t.ged, true);            // Auto-play
   // Enter main loop. Process events as they arrive.
 event_loop:;
+#ifdef FEAT_ALSA
+  if (alsa_shutdown_requested)
+    goto quit;
+#endif
   int key = wgetch(stdscr);
   if (cur_timeout != 0) {
     wtimeout(stdscr, 0); // Until we run out, don't wait between events.
@@ -3918,6 +4264,9 @@ event_loop:;
   }
   goto event_loop;
 quit:
+  // Stop playback: note-offs, MIDI stop (FC) when beat clock is on, and OSC
+  // /orca/stopped when OSC output is set.
+  ged_set_playing(&t.ged, false);
   ged_stop_all_sustained_notes(&t.ged);
   qnav_deinit();
   if (cont_window)
@@ -3927,7 +4276,19 @@ quit:
 #endif
   printf("\033[?2004h\n"); // Tell terminal to not use bracketed paste
   endwin();
+#ifdef FEAT_ALSA
+  snd_lib_error_set_handler(NULL); // libasound's default handler again
+#endif
+#if defined(FEAT_ALSA) && defined(BORCA_DEBUG_COUNTERS)
+  fprintf(stderr,
+          "bOrca ALSA: %zu MIDI sends dropped on EAGAIN/EINTR, %zu not sent "
+          "in all\n",
+          alsa_ctx.send_drops, alsa_ctx.send_failures);
+#endif
   ged_deinit(&t.ged);
+#ifdef FEAT_ALSA
+  alsa_ctx_close(&alsa_ctx); // after ged_deinit, which frees the encoder
+#endif
   osofree(t.file_name);
   osofree(t.osc_address);
   osofree(t.osc_port);

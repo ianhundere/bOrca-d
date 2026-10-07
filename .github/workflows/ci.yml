@@ -8,11 +8,9 @@
 # build/unit_tests and tests/check-*.sh commands a developer runs locally
 # (tests/README.md lists them for the uConsole). Two kinds of step need what
 # the uConsole lacks: the --portmidi builds need libportmidi-dev, and the
-# armhf job needs the armhf cross compiler. The runners' gcc can also differ
+# armhf job needs the armhf cross compiler. The --alsa builds need
+# libasound2-dev, which the uConsole has. The runners' gcc can also differ
 # from the device's; each job's "Toolchain versions" step prints it.
-#
-# Later stories extend this file: P0.7 adds the --alsa builds, including the
-# -d --alsa test build.
 name: CI
 
 on:
@@ -43,19 +41,21 @@ jobs:
         # Pinned images, never -latest. ubuntu-24.04-arm is the closest hosted
         # match to the CM5 (aarch64, unsigned char), but it runs 4 KB pages and
         # glibc 2.39 where the uConsole runs 16 KB pages and glibc 2.36, and it
-        # builds PortMidi where the appliance uses ALSA, so a green arm64 leg
-        # is not proof for the device.
+        # builds the --alsa and appliance binaries against gcc 13.3 and
+        # libasound 1.2.11 (the device has gcc 12.2 and libasound 1.2.8) with
+        # no sequencer to run them on, so a green arm64 leg is not proof for
+        # the device.
         os: [ubuntu-24.04, ubuntu-24.04-arm]
     steps:
       - uses: actions/checkout@v7
 
       - name: Install build dependencies
-        run: sudo apt-get update && sudo apt-get install -y libncurses-dev libportmidi-dev
+        run: sudo apt-get update && sudo apt-get install -y libncurses-dev libportmidi-dev libasound2-dev
 
       - name: Toolchain versions
         run: |
           gcc --version | head -n 1
-          dpkg-query -W gcc binutils libncurses-dev libportmidi-dev
+          dpkg-query -W gcc binutils libncurses-dev libportmidi-dev libasound2-dev
 
       # ASan can fail to start when vm.mmap_rnd_bits is above 28 (recent
       # Ubuntu kernels default to 32). The x64 image sets 28 in runner-images'
@@ -99,10 +99,10 @@ jobs:
 
       # The unit-test runner, in debug (ASan + UBSan). The runner makes UBSan
       # halt at its first report, and the run steps also set halt_on_error,
-      # as tests/run.sh does for the goldens. The --portmidi build adds the
-      # PortMidi adapter tests and fails if it registers none; it writes the
-      # same build/debug/unit_tests, so each build is run before the next one
-      # replaces it.
+      # as tests/run.sh does for the goldens. The --portmidi and --alsa
+      # builds add their adapter tests and fail if they register none; they
+      # write the same build/debug/unit_tests, so each build is run before the
+      # next one replaces it.
       - name: Build debug unit tests
         run: CFLAGS_EXTRA=-Werror ./tool build -d test
 
@@ -133,11 +133,53 @@ jobs:
             exit 1
           fi
 
+      - name: Build debug unit tests with ALSA
+        run: CFLAGS_EXTRA=-Werror ./tool build -d --alsa test
+
+      # Fails unless the ALSA adapter test actually ran, so a build in which
+      # FEAT_ALSA never reaches the compiler cannot pass. The test needs no
+      # sequencer device.
+      - name: Unit tests with the ALSA adapter tests (ASan + UBSan)
+        env:
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: |
+          log="$RUNNER_TEMP/unit_tests_alsa.log"
+          status=0
+          build/debug/unit_tests >"$log" 2>&1 || status=$?
+          cat "$log"
+          if [ "$status" != 0 ]; then
+            echo "unit_tests exited $status"
+            exit 1
+          fi
+          if ! grep -qx 'ok alsa_version_and_open_modes' "$log"; then
+            echo "the ALSA adapter test did not run"
+            exit 1
+          fi
+
+      # A build has at most one hardware MIDI backend (spine AD-17). The
+      # error this step prints is the expected outcome.
+      - name: Check that --alsa and --portmidi exclude each other
+        run: |
+          log="$RUNNER_TEMP/alsa_portmidi.log"
+          if ./tool build --alsa --portmidi orca >"$log" 2>&1; then
+            cat "$log"
+            echo "tool accepted --alsa with --portmidi"
+            exit 1
+          fi
+          cat "$log"
+          if ! grep -q 'Choose ALSA or PortMidi' "$log"; then
+            echo "tool did not say why it refused --alsa with --portmidi"
+            exit 1
+          fi
+
       - name: Build debug orca
         run: CFLAGS_EXTRA=-Werror ./tool build -d orca
 
       - name: Build debug orca with PortMidi (make debug)
         run: CFLAGS_EXTRA=-Werror ./tool build -d --portmidi orca
+
+      - name: Build debug orca with ALSA
+        run: CFLAGS_EXTRA=-Werror ./tool build -d --alsa orca
 
       # Release builds link with -flto, and gcc may print "lto-wrapper:
       # warning: using serial compilation of N LTRANS jobs". That line is a
@@ -148,6 +190,62 @@ jobs:
 
       - name: Build release orca with PortMidi
         run: CFLAGS_EXTRA=-Werror ./tool build --portmidi orca
+
+      # The debug-counter build compiles the drop counters and their stderr
+      # line. It writes build/orca, so it runs before the plain --alsa build,
+      # whose binary the next step checks.
+      - name: Build release orca with ALSA and debug counters
+        run: CFLAGS_EXTRA="-Werror -DBORCA_DEBUG_COUNTERS" ./tool build --alsa orca
+
+      - name: Build release orca with ALSA
+        run: CFLAGS_EXTRA=-Werror ./tool build --alsa orca
+
+      # Fails if --alsa stops reaching the link, which a green build alone
+      # would not show.
+      - name: Check that the ALSA orca links libasound
+        run: |
+          dyn="$RUNNER_TEMP/orca_alsa_dynamic.txt"
+          readelf -d build/orca >"$dyn"
+          grep NEEDED "$dyn"
+          if ! grep -q 'NEEDED.*\[libasound\.so\.2\]' "$dyn"; then
+            echo "build/orca does not link libasound.so.2"
+            exit 1
+          fi
+
+      # The uConsole appliance build: --alsa --harden --pie. make passes
+      # CFLAGS_EXTRA to tool through the environment. Ubuntu's gcc predefines
+      # _FORTIFY_SOURCE, so this step also checks that --harden undefines it
+      # before redefining it.
+      - name: Build the appliance orca (make appliance)
+        run: CFLAGS_EXTRA=-Werror make appliance
+
+      # Fails unless make appliance kept all three of --alsa (libasound),
+      # --pie (an ELF of type DYN) and --harden (the stack protector's
+      # __stack_chk_fail).
+      - name: Check that the appliance orca is ALSA, PIE and hardened
+        run: |
+          dyn="$RUNNER_TEMP/orca_appliance_dynamic.txt"
+          hdr="$RUNNER_TEMP/orca_appliance_header.txt"
+          und="$RUNNER_TEMP/orca_appliance_undefined.txt"
+          readelf -d build/orca >"$dyn"
+          readelf -h build/orca >"$hdr"
+          nm -D --undefined-only build/orca >"$und"
+          grep NEEDED "$dyn"
+          grep 'Type:' "$hdr"
+          status=0
+          if ! grep -q 'NEEDED.*\[libasound\.so\.2\]' "$dyn"; then
+            echo "build/orca does not link libasound.so.2"
+            status=1
+          fi
+          if ! grep -Eq '^[[:space:]]*Type:[[:space:]]+DYN' "$hdr"; then
+            echo "build/orca is not a PIE (ELF type DYN)"
+            status=1
+          fi
+          if ! grep -Eq '[[:space:]]__stack_chk_fail(@|$)' "$und"; then
+            echo "build/orca does not reference __stack_chk_fail"
+            status=1
+          fi
+          exit "$status"
 
   # The goldens were captured on arm64, where gcc treats plain char as
   # unsigned; the x86_64 build leg above checks signed char against them.

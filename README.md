@@ -263,9 +263,48 @@ The interpolation system maintains separate state for each channel+control combi
 
 The operator automatically clamps control numbers above 127 to 127 to ensure valid MIDI CC range. Values use increments of 4 for predictable and musical MIDI CC values.
 
+## Building
+
+`tool`, a POSIX `sh` script, builds everything; `./tool help` lists every option. It needs a C99 compiler and, for the livecoding environment, ncursesw (Debian and Ubuntu: `libncurses-dev`).
+
+```sh
+./tool build orca              # livecoding environment, no hardware MIDI: build/orca
+./tool build --portmidi orca   # with PortMidi MIDI output (libportmidi-dev)
+./tool build --alsa orca       # with native ALSA MIDI output, Linux only (libasound2-dev)
+./tool build -d orca           # debug build with ASan and UBSan: build/debug/orca
+./tool build cli               # headless interpreter: build/cli
+./tool build test              # unit tests: build/unit_tests, see tests/README.md
+```
+
+`--alsa` cannot be combined with `--portmidi` or `--static`, and fails on anything but Linux. An `--alsa` build opens one ALSA sequencer client when it starts, named `bOrca`, or the value of `BORCA_ALSA_CLIENT_NAME` when that is set and non-empty, with one output port, `MIDI out`, that other programs subscribe to (`aconnect -l` lists it). It has no MIDI input. The client opens even with `--osc-midi-bidule`, whose output then replaces it, so such a run also needs a sequencer and, while another `bOrca` runs, its own client name. If the sequencer cannot be opened, or another client already has the name (`orca` waits up to 1 s for it to go, as when a previous instance is still exiting), `orca` prints an error and exits with status 1 before the screen starts; two clients with one name would make the uConsole appliance's router refuse to route either. A MIDI message the sequencer does not take is dropped, never retried, and the HUD's first line then shows a bold `MIDI err` until you quit. SIGTERM, SIGHUP or SIGINT quits cleanly, stopping playback first, unless that signal was already ignored when `orca` started. `orca -h` repeats this in an `--alsa` build.
+
+For development, `CFLAGS_EXTRA=-DBORCA_DEBUG_COUNTERS ./tool build --alsa orca` also counts the dropped messages and, after the screen closes on quit, prints one line to stderr: `bOrca ALSA: <n> MIDI sends dropped on EAGAIN/EINTR, <m> not sent in all`, where `<n>` counts the messages dropped because the sequencer's output was full or the write was interrupted, and `<m>` every message that did not go out.
+
+The `make` wrapper:
+
+```sh
+make release     # ./tool build --portmidi orca (the default target)
+make debug       # ./tool build -d --portmidi orca
+make appliance   # ./tool build --alsa --harden --pie orca, Linux only: the uConsole appliance build
+make clean       # removes build/
+```
+
 ## Changelog
 
 Changes since boorch/bOrca `4f349cd` that alter how an existing patch plays, change what goes out over MIDI, or break the public `orca_run` API, newest first. Each entry has a one-line title, says what changed and why, shows a before/after example, and points at an updated or new patch under `examples/`. The id in brackets at the end of an entry (`P0.1`, `B2`, …) is the item in the fork's implementation spec, the same vocabulary the `.xfail` markers under `tests/` use.
+
+### Quitting while playing sends MIDI stop when beat clock is on, and `/orca/stopped` when OSC output is set
+
+Quitting now stops playback first, as pausing does, so a device that follows bOrca's beat clock stops with it and an OSC listener hears that playback ended. Before, quitting only released the sustained notes. This applies to every build; in `--alsa` builds SIGTERM, SIGHUP and SIGINT quit the same way. Quitting while paused sends nothing new, because pausing already sent these messages.
+
+Before → after, quitting while playing with beat clock on and OSC output set:
+
+```
+before: note-offs
+after:  note-offs, OSC /orca/stopped, MIDI stop (FC)
+```
+
+No example patch: the change concerns quitting, not how a patch plays. (P0.7)
 
 ### Lowercase `j` and `y` wires grow when banged
 
