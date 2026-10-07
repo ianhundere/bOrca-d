@@ -63,16 +63,18 @@ review.
 
 ### Goldens that record current behaviour on purpose
 
-Two groups are replaced, not marked expected-fail, when their item lands:
+`r_single` and `r_shared` are replaced, not marked expected-fail, when B6
+lands: B6's exact sequence depends on the PRNG it picks, so its fixed output
+cannot be written ahead of time; B6 replaces these files and proves the
+no-repeat and permutation properties in a unit test. Until then lowercase `r`
+shuffles with glibc's unseeded `rand()`, so these two goldens hold the glibc
+stream: they pass on Linux and fail on macOS or musl, and `--seed` does not
+affect them.
 
-- `j_banged_under_j` and `y_banged_right_of_y`: captured before the upstream
-  "wires can grow" cherry-pick (P0.1), which changes them.
-- `r_single` and `r_shared`: B6's exact sequence depends on the PRNG it picks,
-  so its fixed output cannot be written ahead of time; B6 replaces these files
-  and proves the no-repeat and permutation properties in a unit test. Until
-  then lowercase `r` shuffles with glibc's unseeded `rand()`, so these two
-  goldens hold the glibc stream: they pass on Linux and fail on macOS or musl,
-  and `--seed` does not affect them.
+`j_banged_under_j` and `y_banged_right_of_y` were captured before the
+upstream "Allow wires to grow" cherry-pick (P0.1) and replaced by it; together
+with `j_reads_locked_J`, added with that pick, they now pin the grown-wire
+behaviour.
 
 The `&` state-overflow fixture is a sanitizer check, not a golden: its output
 differs between builds until B1 lands, so B1 adds it under the unit-test

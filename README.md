@@ -265,4 +265,25 @@ The operator automatically clamps control numbers above 127 to 127 to ensure val
 
 ## Changelog
 
-Changes since boorch/bOrca `4f349cd` that alter how an existing patch plays, change what goes out over MIDI, or break the public `orca_run` API, newest first. Each entry has a one-line title, says what changed and why, shows a before/after example, and points at an updated or new patch under `examples/`.
+Changes since boorch/bOrca `4f349cd` that alter how an existing patch plays, change what goes out over MIDI, or break the public `orca_run` API, newest first. Each entry has a one-line title, says what changed and why, shows a before/after example, and points at an updated or new patch under `examples/`. The id in brackets at the end of an entry (`P0.1`, `B2`, …) is the item in the fork's implementation spec, the same vocabulary the `.xfail` markers under `tests/` use.
+
+### Lowercase `j` and `y` wires grow when banged
+
+Upstream Orca-c `723638f` ("Allow wires to grow"), cherry-picked. `J` and `Y` now check whether the cell they read holds the literal `J`/`Y` instead of their own glyph, so a wire of lowercase `j` or `y` can lengthen itself from a bang rather than by hand: a banged lowercase `j` directly below another `j` appends a `j` at the end of the run, and a banged `y` directly right of another `y` appends a `y` at the end of the run. Before, such a bang was consumed and nothing else changed.
+
+Before → after, banging the lower `j`:
+
+```
+.j..    .j..
+.j*.    .j..
+....    .j..
+```
+
+Before → after, banging the right-hand `y`:
+
+```
+.yy.    .yyy
+..*.    ....
+```
+
+A third case changes by the same rule: a banged lowercase `j` whose input cell holds a locked `J` (inside a `#` comment, say) used to copy that `J` downward and now stays silent; `y` reading a locked `Y` likewise. Uppercase `J`/`Y` chains behave as before. Example: `examples/misc/wires.orca`; repro patches: `tests/patches/j_banged_under_j.orca`, `y_banged_right_of_y.orca`, `j_reads_locked_J.orca`. (P0.1)
