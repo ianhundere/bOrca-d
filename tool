@@ -331,7 +331,7 @@ build_target() {
   add source_files gbuffer.c field.c vmio.c sim.c
   case $1 in
     cli)
-      add source_files cli_main.c
+      add source_files events_print.c cli_main.c
       out_exe=cli
     ;;
     orca|tui)

@@ -1,6 +1,10 @@
 #pragma once
 #include "base.h"
 
+// Marks bOrca's event set. events_print.c guards bOrca-only event types with
+// it, so the same file also compiles against upstream Orca-c's vmio.h.
+#define ORCA_VMIO_BORCA 1
+
 typedef enum {
   Oevent_type_midi_note,
   Oevent_type_midi_cc,

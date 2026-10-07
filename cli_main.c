@@ -1,8 +1,11 @@
 #include "base.h"
+#include "events_print.h"
 #include "field.h"
 #include "gbuffer.h"
 #include "sim.h"
 #include "vmio.h"
+#include <ctype.h>
+#include <errno.h>
 #include <getopt.h>
 
 static ORCA_NOINLINE void usage(void) { // clang-format off
@@ -12,18 +15,48 @@ fprintf(stderr,
 "    -t <number>   Number of timesteps to simulate.\n"
 "                  Must be 0 or a positive integer.\n"
 "                  Default: 1\n"
-"    -q or --quiet Don't print the result to stdout.\n"
+"    -q or --quiet Don't print the grid to stdout.\n"
+"    --events      After each tick, print that tick's output events, one\n"
+"                  per line (NOTE, CC, CCI, PB, OSC, UDP, each prefixed\n"
+"                  t<tick>), then 't<tick> GRID' and the grid. With -q,\n"
+"                  print the event lines only.\n"
+"    --seed <n>    Seed for the random operators. Default: 0\n"
+"    --dialect <d> Operator dialect: borca (default) or upstream.\n"
+"                  upstream is not implemented yet and is rejected.\n"
 "    -h or --help  Print this message and exit.\n"
 );} // clang-format on
 
+enum { Argopt_events = UCHAR_MAX + 1, Argopt_seed, Argopt_dialect };
+
+// Parses a non-negative decimal integer: digits only, no sign, no whitespace,
+// no trailing text, no overflow, and at most max. Used by -t and --seed, so
+// the golden suite's flags have one parser.
+static bool parse_usz(char const *s, Usz max, Usz *out) {
+  if (!isdigit((unsigned char)s[0]))
+    return false;
+  errno = 0;
+  char *end = NULL;
+  unsigned long long v = strtoull(s, &end, 10);
+  if (*end != '\0' || errno == ERANGE || v > (unsigned long long)max)
+    return false;
+  *out = (Usz)v;
+  return true;
+}
+
 int main(int argc, char **argv) {
-  static struct option cli_options[] = {{"help", no_argument, 0, 'h'},
-                                        {"quiet", no_argument, 0, 'q'},
-                                        {NULL, 0, NULL, 0}};
+  static struct option cli_options[] = {
+      {"help", no_argument, 0, 'h'},
+      {"quiet", no_argument, 0, 'q'},
+      {"events", no_argument, 0, Argopt_events},
+      {"seed", required_argument, 0, Argopt_seed},
+      {"dialect", required_argument, 0, Argopt_dialect},
+      {NULL, 0, NULL, 0}};
 
   char *input_file = NULL;
-  int ticks = 1;
+  Usz max_ticks = 1;
   bool print_output = true;
+  bool print_events = false;
+  Usz seed = 0;
 
   for (;;) {
     int c = getopt_long(argc, argv, "t:qh", cli_options, NULL);
@@ -31,8 +64,7 @@ int main(int argc, char **argv) {
       break;
     switch (c) {
     case 't':
-      ticks = atoi(optarg);
-      if (ticks == 0 && strcmp(optarg, "0")) {
+      if (!parse_usz(optarg, SIZE_MAX, &max_ticks)) {
         fprintf(stderr,
                 "Bad timestep argument %s.\n"
                 "Must be 0 or a positive integer.\n",
@@ -42,6 +74,31 @@ int main(int argc, char **argv) {
       break;
     case 'q':
       print_output = false;
+      break;
+    case Argopt_events:
+      print_events = true;
+      break;
+    case Argopt_seed:
+      if (!parse_usz(optarg, SIZE_MAX, &seed)) {
+        fprintf(stderr,
+                "Bad seed argument %s.\n"
+                "Must be 0 or a positive integer.\n",
+                optarg);
+        return 1;
+      }
+      break;
+    case Argopt_dialect:
+      if (strcmp(optarg, "upstream") == 0) {
+        fprintf(stderr, "Dialect upstream is not implemented yet. "
+                        "Only borca is available.\n");
+        return 1;
+      }
+      if (strcmp(optarg, "borca") != 0) {
+        fprintf(stderr, "Unknown dialect %s. Expected borca or upstream.\n",
+                optarg);
+        return 1;
+      }
+      // I1 (CAP-13) passes the accepted dialect to orca_run from here.
       break;
     case 'h':
       usage();
@@ -65,11 +122,6 @@ int main(int argc, char **argv) {
     usage();
     return 1;
   }
-  if (ticks < 0) {
-    fprintf(stderr, "Time must be >= 0.\n");
-    usage();
-    return 1;
-  }
 
   Field field;
   field_init(&field);
@@ -84,17 +136,30 @@ int main(int argc, char **argv) {
   mbuf_reusable_ensure_size(&mbuf_r, field.height, field.width);
   Oevent_list oevent_list;
   oevent_list_init(&oevent_list);
-  Usz max_ticks = (Usz)ticks;
   for (Usz i = 0; i < max_ticks; ++i) {
     mbuffer_clear(mbuf_r.buffer, field.height, field.width);
     oevent_list_clear(&oevent_list);
     orca_run(field.buffer, mbuf_r.buffer, field.height, field.width, i,
-             &oevent_list, 0);
+             &oevent_list, seed);
+    if (print_events) {
+      events_print(stdout, i, oevent_list.buffer, oevent_list.count);
+      if (print_output) {
+        printf("t%zu GRID\n", i);
+        field_fput(&field, stdout);
+      }
+    }
   }
   mbuf_reusable_deinit(&mbuf_r);
   oevent_list_deinit(&oevent_list);
-  if (print_output)
+  // With --events every tick already printed its grid; print the final grid
+  // only in the plain mode, as before.
+  if (print_output && !print_events)
     field_fput(&field, stdout);
   field_deinit(&field);
+  // The output is a test oracle, so a write failure must not exit 0.
+  if (fflush(stdout) != 0 || ferror(stdout)) {
+    perror("cli: stdout");
+    return 1;
+  }
   return 0;
 }
