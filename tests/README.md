@@ -79,3 +79,47 @@ behaviour.
 The `&` state-overflow fixture is a sanitizer check, not a golden: its output
 differs between builds until B1 lands, so B1 adds it under the unit-test
 target.
+
+## CI
+
+`.github/workflows/ci.yml` runs on pushes and pull requests to
+`spec/borca-fixes`; start a manual run with
+`gh workflow run ci.yml --ref spec/borca-fixes`.
+
+- **build** (pinned `ubuntu-24.04` and `ubuntu-24.04-arm`, never `-latest`):
+  first checks that `CFLAGS_EXTRA` reaches the compiler, then builds the
+  debug and release `cli` with `CFLAGS_EXTRA=-Werror` and runs this suite on
+  both, then builds the debug `orca`, the debug `orca` with PortMidi (`make
+  debug`), the release `orca` without mouse support and the release `orca`
+  with PortMidi, all with `-Werror`.
+- **unsigned-char** (`ubuntu-24.04`): runs the suite on a release `cli`
+  built with `-funsigned-char`.
+- **armhf** (`ubuntu-24.04`, optional): only cross-compiles the `cli`
+  sources with `arm-linux-gnueabihf-gcc`; a red result does not fail the run.
+
+`tool` adds `CFLAGS_EXTRA` after its own compiler flags, split on spaces. To
+reproduce a red `build` or `unsigned-char` step on the uConsole:
+
+```sh
+CFLAGS_EXTRA=-Werror nice -n 19 taskset -c 0-2 ./tool build -d cli
+nice -n 19 taskset -c 0-2 tests/run.sh build/debug/cli
+CFLAGS_EXTRA=-Werror nice -n 19 taskset -c 0-2 ./tool build cli
+nice -n 19 taskset -c 0-2 tests/run.sh build/cli
+CFLAGS_EXTRA=-Werror nice -n 19 taskset -c 0-2 ./tool build -d orca
+CFLAGS_EXTRA=-Werror nice -n 19 taskset -c 0-2 ./tool build --no-mouse orca
+```
+
+On aarch64 plain `char` is already unsigned, so the release run above
+covers the `unsigned-char` job. The x86_64 `build` leg uses signed `char`;
+reproduce a failure that only it shows with:
+
+```sh
+CFLAGS_EXTRA="-Werror -fsigned-char" nice -n 19 taskset -c 0-2 ./tool build cli
+nice -n 19 taskset -c 0-2 tests/run.sh build/cli
+```
+
+Two kinds of step cannot be reproduced on the uConsole as it stands: the
+PortMidi builds need `libportmidi-dev` (installing it needs Ian's
+approval), and the `armhf` job needs the armhf cross compiler. The runners'
+gcc can warn where the uConsole's gcc 12.2 does not; each job prints its
+compiler version in its "Toolchain versions" step.

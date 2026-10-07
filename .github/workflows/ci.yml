@@ -1,0 +1,161 @@
+# bOrca CI (spec item P0.4, architecture decision AD-21).
+#
+# Runs only for spec/borca-fixes: main in this fork holds the JS Orca and
+# keeps no workflow, so workflow_dispatch has no Run button in the web UI;
+# start a manual run with `gh workflow run ci.yml --ref spec/borca-fixes`.
+#
+# The build and unsigned-char jobs run the same ./tool and tests/run.sh
+# commands a developer runs locally (tests/README.md lists them for the
+# uConsole). Two kinds of step need what the uConsole lacks: the --portmidi
+# builds need libportmidi-dev, and the armhf job needs the armhf cross
+# compiler. The runners' gcc can also differ from the device's; each job's
+# "Toolchain versions" step prints it.
+#
+# Later stories extend this file: P0.6 adds the unit-test, nm and include
+# checks, and P0.7 adds the --alsa builds.
+name: CI
+
+on:
+  push:
+    branches: [spec/borca-fixes]
+  pull_request:
+    branches: [spec/borca-fixes]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # Cancel superseded pull-request runs only: every pushed head of the branch
+  # keeps its own result.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      # A red x86_64 leg must not cancel the arm64 result, or the reverse.
+      fail-fast: false
+      matrix:
+        # Pinned images, never -latest. ubuntu-24.04-arm is the closest hosted
+        # match to the CM5 (aarch64, unsigned char), but it runs 4 KB pages and
+        # glibc 2.39 where the uConsole runs 16 KB pages and glibc 2.36, and it
+        # builds PortMidi where the appliance uses ALSA, so a green arm64 leg
+        # is not proof for the device.
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y libncurses-dev libportmidi-dev
+
+      - name: Toolchain versions
+        run: |
+          gcc --version | head -n 1
+          dpkg-query -W gcc binutils libncurses-dev libportmidi-dev
+
+      # ASan can fail to start when vm.mmap_rnd_bits is above 28 (recent
+      # Ubuntu kernels default to 32). The x64 image sets 28 in runner-images'
+      # configure-environment.sh; setting it here keeps the sanitized runs
+      # working on any image that does not.
+      - name: Set vm.mmap_rnd_bits=28 for ASan
+        run: sudo sysctl -w vm.mmap_rnd_bits=28
+
+      # Fails if tool stops passing CFLAGS_EXTRA to the compiler, which would
+      # turn every -Werror step below into a silent no-op. The compiler error
+      # this step prints is the expected outcome.
+      - name: Check that CFLAGS_EXTRA reaches the compiler
+        run: |
+          if CFLAGS_EXTRA=-fborca-no-such-flag ./tool build cli; then
+            echo "tool ignored CFLAGS_EXTRA"
+            exit 1
+          fi
+
+      # The cli builds and their suites run before the orca builds, so a
+      # warning that only the TUI triggers cannot hide the golden results.
+      - name: Build debug cli
+        run: CFLAGS_EXTRA=-Werror ./tool build -d cli
+
+      - name: Build release cli
+        run: CFLAGS_EXTRA=-Werror ./tool build cli
+
+      - name: Golden suite on the debug cli (ASan + UBSan)
+        run: tests/run.sh build/debug/cli
+
+      - name: Golden suite on the release cli
+        run: tests/run.sh build/cli
+
+      - name: Build debug orca
+        run: CFLAGS_EXTRA=-Werror ./tool build -d orca
+
+      - name: Build debug orca with PortMidi (make debug)
+        run: CFLAGS_EXTRA=-Werror ./tool build -d --portmidi orca
+
+      # Release builds link with -flto, and gcc may print "lto-wrapper:
+      # warning: using serial compilation of N LTRANS jobs". That line is a
+      # note from the link step, not a compiler diagnostic, and -Werror does
+      # not turn it into an error.
+      - name: Build release orca without mouse support
+        run: CFLAGS_EXTRA=-Werror ./tool build --no-mouse orca
+
+      - name: Build release orca with PortMidi
+        run: CFLAGS_EXTRA=-Werror ./tool build --portmidi orca
+
+  # The goldens were captured on arm64, where gcc treats plain char as
+  # unsigned; the x86_64 build leg above checks signed char against them.
+  # This job checks the release cli built with unsigned char on x86_64.
+  unsigned-char:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build release cli with -funsigned-char
+        run: CFLAGS_EXTRA="-Werror -funsigned-char" ./tool build cli
+
+      - name: Golden suite against the committed goldens
+        run: tests/run.sh build/cli
+
+  # Optional compile-only check for 32-bit ARM (Pi Zero 2W), where Usz is
+  # 32-bit. It calls the cross compiler directly instead of going through
+  # tool, because tool picks -march from the host's uname -m and would hand
+  # -march=nehalem to the arm compiler. The warning flags below are copied by
+  # hand from tool's build_target (the "add cc_flags -std=c99 ..." lines),
+  # plus its release -O2 -DNDEBUG and -Werror, and must be kept in sync with
+  # it. The job ignores CFLAGS_EXTRA and leaves out the rest of tool's release
+  # flags (-g0, the fortify and stack-protector overrides, -no-pie), and
+  # Ubuntu's cross gcc enables some hardening by default, so it checks the
+  # sources' portability rather than reproducing the release build.
+  armhf:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+
+      # No --no-install-recommends: libc6-dev-armhf-cross is only a Recommends.
+      - name: Install the armhf cross compiler
+        run: sudo apt-get update && sudo apt-get install -y gcc-arm-linux-gnueabihf
+
+      - name: Toolchain versions
+        run: arm-linux-gnueabihf-gcc --version | head -n 1
+
+      # The file list duplicates tool's cli sources until P0.6 introduces the
+      # shared CORE list. Every file is compiled even after a failure, so one
+      # run reports them all.
+      - name: Compile each source for armhf
+        run: |
+          status=0
+          for f in gbuffer.c field.c vmio.c sim.c events_print.c cli_main.c; do
+            echo "arm-linux-gnueabihf-gcc -c $f"
+            arm-linux-gnueabihf-gcc -std=c99 -pipe -finput-charset=UTF-8 \
+              -Wall -Wpedantic -Wextra -Wwrite-strings -Wconversion -Wshadow \
+              -Wstrict-prototypes -Werror=implicit-function-declaration \
+              -Werror=implicit-int -Werror=incompatible-pointer-types \
+              -Werror=int-conversion -O2 -DNDEBUG -Werror \
+              -c "$f" -o /dev/null || status=1
+          done
+          exit "$status"

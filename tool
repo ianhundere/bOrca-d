@@ -30,6 +30,11 @@ Options:
     -s             Print statistics about compile time and binary size.
     -v             Print important commands as they're executed.
     -h or --help   Print this message and exit.
+Environment:
+    CFLAGS_EXTRA   Extra compiler flags, added after tool's own compiler
+                   flags and before the source files and libraries. Split
+                   on spaces, so a single flag cannot contain a space.
+                   Example: CFLAGS_EXTRA=-Werror ./tool build cli
 Optional Features:
     --portmidi     Enable or disable hardware MIDI output support with
     --no-portmidi  PortMidi. Note: PortMidi has memory leaks and bugs.
@@ -432,6 +437,11 @@ EOF
     try_make_dir "$build_dir"
   fi
   out_path=$build_dir/$out_exe
+  # Extra flags from the environment go after the compiler flags above, so
+  # they can add to or override them. Split on spaces intentionally: a single flag cannot
+  # contain a space. Unset or empty adds nothing.
+  # shellcheck disable=SC2086
+  add cc_flags ${CFLAGS_EXTRA:-}
   IFS='
 '
   # shellcheck disable=SC2086
