@@ -1,0 +1,6 @@
+# Patches and golden outputs are compared byte for byte: never convert their
+# line endings on checkout or commit.
+*.orca -text
+*.events -text
+*.args -text
+*.xfail -text
