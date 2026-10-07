@@ -44,3 +44,7 @@
 
 # Default build dir
 build/
+
+# macOS Finder metadata
+.DS_Store
+._*

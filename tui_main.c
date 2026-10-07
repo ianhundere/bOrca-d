@@ -699,11 +699,7 @@ staticni void draw_oevent_list(WINDOW *win, Oevent_list const *oevent_list) {
       break;
     }
     case Oevent_type_udp_string: {
-      // Oevent_udp_string const *eo = &ev->udp_string;
-      // wprintw(win, "UDP\tcount %d\t", (int)eo->count);
-      // for (Usz j = 0; j < (Usz)eo->count; ++j) {
-      //   waddch(win, (chtype)eo->chars[j]);
-      // }
+      // Nothing in the bOrca dialect emits UDP; the upstream dialect restores it.
       break;
     }
     }
@@ -1218,10 +1214,7 @@ staticni void send_output_events(Oosc_dev *oosc_dev, Midi_mode *midi_mode,
       break;
     }
     case Oevent_type_udp_string: {
-      // if (!oosc_dev)
-      //   continue;
-      // Oevent_udp_string const *eo = &e->udp_string;
-      // oosc_send_datagram(oosc_dev, eo->chars, eo->count);
+      // Nothing in the bOrca dialect emits UDP; the upstream dialect restores it.
       break;
     }
     }
@@ -2344,7 +2337,6 @@ static void push_opers_guide_msg(void) {
       {'$', "scale", "Outputs note base on root, scale, degree."},
       {'%', "mono", "Sends MIDI monophonic note."},
       {'=', "midichord", "Sends preset chords over MIDI."},
-      // {';', "udp", "Sends UDP message."},
       {';', "arpeggiator", "Outputs degree numbers for Scale operator."},
       {'&', "bouncer", "A rudimentary LFO-like operator."}
       };

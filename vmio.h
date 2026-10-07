@@ -14,12 +14,6 @@ typedef struct {
   U8 oevent_type;
 } Oevent_any;
 
-// typedef struct {
-//   U8 oevent_type;
-//   U8 channel, octave, note, velocity, duration : 7, mono : 1;
-// } Oevent_midi_note;
-
-// midi channel fix?            
 typedef struct {
   U8 oevent_type;
   U8 channel;

@@ -262,3 +262,7 @@ When the 6th parameter (interpolation rate) is provided and not `.`, the operato
 The interpolation system maintains separate state for each channel+control combination, allowing multiple CCs to interpolate independently.
 
 The operator automatically clamps control numbers above 127 to 127 to ensure valid MIDI CC range. Values use increments of 4 for predictable and musical MIDI CC values.
+
+## Changelog
+
+Changes since boorch/bOrca `4f349cd` that alter how an existing patch plays, change what goes out over MIDI, or break the public `orca_run` API, newest first. Each entry has a one-line title, says what changed and why, shows a before/after example, and points at an updated or new patch under `examples/`.
