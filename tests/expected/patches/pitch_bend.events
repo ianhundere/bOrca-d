@@ -1,0 +1,16 @@
+t0 PB ch0 msb0 lsb0
+t0 PB ch0 msb127 lsb127
+t0 PB ch1 msb0 lsb127
+t0 PB ch1 msb127 lsb0
+t0 PB ch15 msb61 lsb25
+t0 GRID
+D1....D1....D1....D1....D1....D1....
+*?000.*?0zz.*?10z.*?1z0.*?fh7.*?gzz.
+t1 PB ch0 msb0 lsb0
+t1 PB ch0 msb127 lsb127
+t1 PB ch1 msb0 lsb127
+t1 PB ch1 msb127 lsb0
+t1 PB ch15 msb61 lsb25
+t1 GRID
+D1....D1....D1....D1....D1....D1....
+*?000.*?0zz.*?10z.*?1z0.*?fh7.*?gzz.

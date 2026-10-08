@@ -8,17 +8,19 @@
 # the expected file appends flags; later flags win) and its output is compared
 # byte for byte with tests/expected/<examples|patches>/<name>.events.
 #
-# A <name>.xfail sidecar lists the spec items (space-separated) whose fixes
-# the case still waits for: an output mismatch is then XFAIL and does not fail
-# the run, while an unexpected pass (XPASS) does, so the commit that lands an
-# item removes its id from the marker and deletes the file when it is empty.
-# A marker never hides a crash: a sanitizer report, a signal or a timeout
-# fails the run whatever the marker says.
+# A <name>.xfail sidecar names the one spec item whose fix the case still
+# waits for: exactly one id matching ^(B[1-8]|I[1-6])$, so a repro that waits
+# for two items is two cases. An output mismatch is then XFAIL and does not
+# fail the run, while an unexpected pass (XPASS) does, so the commit that
+# lands the item deletes the marker. A marker that is empty, holds anything
+# but one such id, or names two ids fails the case as a bad marker, in both
+# modes. A marker never hides a crash: a sanitizer report, a signal or a
+# timeout fails the run whatever the marker says.
 #
 # --update rewrites expected files from the current output and skips cases
-# that carry a marker, so hand-written fixed-behaviour files are never
-# overwritten by accident. Expected files or sidecars whose input no longer
-# exists are reported as ORPHAN and fail the run.
+# that carry a marker, valid or bad, so hand-written fixed-behaviour files
+# are never overwritten by accident. Expected files or sidecars whose input
+# no longer exists are reported as ORPHAN and fail the run.
 #
 # Exit status: 0 when every case is PASS or XFAIL and nothing is orphaned,
 # 1 otherwise, 2 on usage.
@@ -73,6 +75,25 @@ expected_base() {
   esac
 }
 
+# read_marker <.xfail path relative to root>: sets rc_xfail to the marker's
+# item id, or rc_bad to why it is not exactly one valid id.
+read_marker() {
+  rm_out=$(LC_ALL=C awk '
+    { for (i = 1; i <= NF; i++) { n++; w = w (n > 1 ? " " : "") $i } }
+    END {
+      gsub(/[^ -~]/, "?", w)
+      if (n == 0) print "bad holds no id"
+      else if (n > 1) printf "bad names %d ids, %s\n", n, w
+      else if (w !~ /^(B[1-8]|I[1-6])$/) printf "bad holds %s, not an item id\n", w
+      else print "ok " w
+    }' "$root/$1" 2>&1)
+  case $rm_out in
+    "ok "*) rc_xfail=${rm_out#ok } ;;
+    "bad "*) rc_bad=${rm_out#bad } ;;
+    *) rc_bad="cannot be read" ;;
+  esac
+}
+
 # run_case <input path relative to root>
 run_case() {
   rc_in=$1
@@ -87,10 +108,21 @@ run_case() {
     rc_args="$rc_args $(cat "$root/$rc_base.args")"
   fi
   rc_xfail=
+  rc_bad=
   if [ -f "$root/$rc_base.xfail" ]; then
-    rc_xfail=$(cat "$root/$rc_base.xfail")
+    read_marker "$rc_base.xfail"
   fi
   n_total=$((n_total + 1))
+  if [ -n "$rc_bad" ]; then
+    rc_note=
+    if [ "$update" = 1 ]; then
+      rc_note="; not updated"
+    fi
+    printf 'FAIL  %s (bad marker: %s %s; it must hold one item id, B1-B8 or I1-I6%s)\n' \
+      "$rc_in" "$rc_base.xfail" "$rc_bad" "$rc_note"
+    n_fail=$((n_fail + 1))
+    return
+  fi
 
   # shellcheck disable=SC2086  # $timeout_cmd and $rc_args are word lists
   $timeout_cmd "$cli" --events $rc_args "$root/$rc_in" >"$tmp" 2>&1
@@ -132,7 +164,7 @@ run_case() {
   fi
   if [ "$rc_status" = 0 ] && cmp -s "$tmp" "$rc_exp"; then
     if [ -n "$rc_xfail" ]; then
-      printf 'XPASS %s (marked xfail for %s: remove the landed id from %s)\n' \
+      printf 'XPASS %s (marked xfail for %s: delete %s)\n' \
         "$rc_in" "$rc_xfail" "$rc_base.xfail"
       n_xpass=$((n_xpass + 1))
     else

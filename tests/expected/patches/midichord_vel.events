@@ -1,10 +1,6 @@
 t0 NOTE ch1 note36 vel119 len1 mono0
 t0 NOTE ch1 note40 vel119 len1 mono0
 t0 NOTE ch1 note43 vel119 len1 mono0
-t0 NOTE ch1 note40 vel119 len1 mono0
-t0 NOTE ch1 note43 vel119 len1 mono0
-t0 NOTE ch1 note48 vel119 len1 mono0
-t0 NOTE ch1 note36 vel119 len1 mono0
 t0 NOTE ch1 note36 vel119 len1 mono0
 t0 NOTE ch1 note40 vel119 len1 mono0
 t0 NOTE ch1 note43 vel119 len1 mono0
@@ -12,10 +8,6 @@ t0 NOTE ch1 note48 vel119 len1 mono0
 t0 GRID
 D1........
 *=13Caf1..
-D1........
-*=13CAf1..
-D1........
-*:13Cf1...
 D1........
 *=13C0f1..
 D1........

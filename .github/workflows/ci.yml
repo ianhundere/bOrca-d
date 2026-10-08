@@ -79,6 +79,34 @@ jobs:
       - name: Build debug cli
         run: CFLAGS_EXTRA=-Werror ./tool build -d cli
 
+      # tool only warns when it cannot detect the compiler, and then builds
+      # the debug cli without sanitizers, which the golden suite would not
+      # notice. Fails unless the binary imports ASan and UBSan.
+      - name: Check that the debug cli is sanitized
+        run: tests/check-debug-build.sh build/debug/cli
+
+      # The check's failure path: a program built with plain cc, unsanitized
+      # and not stripped, must fail it, naming both sanitizers.
+      - name: Debug-build check rejects an unsanitized binary
+        run: |
+          prog="$RUNNER_TEMP/unsanitized"
+          log="$RUNNER_TEMP/unsanitized_check.log"
+          printf 'int main(void) { return 0; }\n' >"$prog.c"
+          cc -O0 "$prog.c" -o "$prog"
+          status=0
+          tests/check-debug-build.sh "$prog" >"$log" 2>&1 || status=$?
+          cat "$log"
+          if [ "$status" != 1 ]; then
+            echo "expected exit 1 from the unsanitized binary, got $status"
+            exit 1
+          fi
+          for want in __asan_init __ubsan_handle_; do
+            if ! grep -q "$want" "$log"; then
+              echo "the check did not name $want"
+              exit 1
+            fi
+          done
+
       - name: Build release cli
         run: CFLAGS_EXTRA=-Werror ./tool build cli
 
@@ -87,6 +115,40 @@ jobs:
 
       - name: Golden suite on the release cli
         run: tests/run.sh build/cli
+
+      # tests/run.sh's bad-marker path: a throwaway pitch_bend.xfail that is
+      # not exactly one item id must fail the case, and --update must leave
+      # pitch_bend.events alone. The events file is edited first, so a
+      # rewrite would show; the tree is restored and must end clean.
+      - name: Golden suite rejects a bad marker
+        run: |
+          marker=tests/expected/patches/pitch_bend.xfail
+          events=tests/expected/patches/pitch_bend.events
+          log="$RUNNER_TEMP/bad_marker.log"
+          for bad in 'TODO' 'B2 B5'; do
+            printf '%s\n' "$bad" >"$marker"
+            status=0
+            tests/run.sh build/cli pitch_bend >"$log" 2>&1 || status=$?
+            cat "$log"
+            if [ "$status" != 1 ] || ! grep -q 'bad marker' "$log"; then
+              echo "marker '$bad': expected exit 1 with a bad marker, got $status"
+              exit 1
+            fi
+            echo "edited by CI" >>"$events"
+            cp "$events" "$RUNNER_TEMP/pitch_bend.events.edited"
+            status=0
+            tests/run.sh --update build/cli pitch_bend >"$log" 2>&1 || status=$?
+            cat "$log"
+            if [ "$status" != 1 ] ||
+              ! cmp -s "$events" "$RUNNER_TEMP/pitch_bend.events.edited"; then
+              echo "marker '$bad': --update must exit 1 and leave $events alone"
+              exit 1
+            fi
+            git checkout -- "$events"
+            rm "$marker"
+          done
+          git diff --exit-code
+          test -z "$(git status --porcelain)"
 
       # AD-2 and AD-1 over every file in ./tool sources core; the expected
       # failures are listed in tests/xfail/. They need no build, so they run
@@ -101,15 +163,52 @@ jobs:
       # halt at its first report, and the run steps also set halt_on_error,
       # as tests/run.sh does for the goldens. The --portmidi and --alsa
       # builds add their adapter tests and fail if they register none; they
-      # write the same build/debug/unit_tests, so each build is run before the
-      # next one replaces it.
+      # write the same build/debug/unit_tests, so each build is run, and
+      # checked, before the next one replaces it. After each run,
+      # tests/check-debug-build.sh fails unless the runner imports ASan and
+      # UBSan and its "<n> tests" count equals the T test_* functions it
+      # defines, so a test that no list registers cannot sit unrun.
       - name: Build debug unit tests
         run: CFLAGS_EXTRA=-Werror ./tool build -d test
 
       - name: Unit tests (ASan + UBSan)
         env:
           UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
-        run: build/debug/unit_tests
+        run: |
+          log="$RUNNER_TEMP/unit_tests.log"
+          status=0
+          build/debug/unit_tests >"$log" 2>&1 || status=$?
+          cat "$log"
+          if [ "$status" != 0 ]; then
+            echo "unit_tests exited $status"
+            exit 1
+          fi
+          tests/check-debug-build.sh build/debug/unit_tests "$log"
+
+      # The check's count path: with -DUNIT_TESTS_UNREGISTERED_CANARY the
+      # runner defines test_unregistered_canary, which has its own prototype
+      # and is in no list, so it never runs and the check must name it. The
+      # next step rebuilds build/debug/unit_tests.
+      - name: Debug-build check names an unregistered test (canary)
+        env:
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: |
+          CFLAGS_EXTRA="-Werror -DUNIT_TESTS_UNREGISTERED_CANARY" ./tool build -d test
+          log="$RUNNER_TEMP/unit_tests_unregistered.log"
+          check="$RUNNER_TEMP/unit_tests_unregistered_check.log"
+          build/debug/unit_tests >"$log" 2>&1
+          cat "$log"
+          status=0
+          tests/check-debug-build.sh build/debug/unit_tests "$log" >"$check" 2>&1 || status=$?
+          cat "$check"
+          if [ "$status" != 1 ]; then
+            echo "expected exit 1 from the unregistered canary, got $status"
+            exit 1
+          fi
+          if ! grep -q 'never run: test_unregistered_canary' "$check"; then
+            echo "the check did not name test_unregistered_canary"
+            exit 1
+          fi
 
       - name: Build debug unit tests with PortMidi
         run: CFLAGS_EXTRA=-Werror ./tool build -d --portmidi test
@@ -132,6 +231,7 @@ jobs:
             echo "the PortMidi adapter test did not run"
             exit 1
           fi
+          tests/check-debug-build.sh build/debug/unit_tests "$log"
 
       - name: Build debug unit tests with ALSA
         run: CFLAGS_EXTRA=-Werror ./tool build -d --alsa test
@@ -155,6 +255,7 @@ jobs:
             echo "the ALSA adapter test did not run"
             exit 1
           fi
+          tests/check-debug-build.sh build/debug/unit_tests "$log"
 
       # A build has at most one hardware MIDI backend (spine AD-17). The
       # error this step prints is the expected outcome.
@@ -288,7 +389,7 @@ jobs:
 
       # ubuntu-24.04 ships shellcheck (0.9.0); the arm image is not known to.
       - name: Shellcheck the build and test scripts
-        run: shellcheck -s sh tool tests/run.sh tests/check-includes.sh tests/check-nm.sh
+        run: shellcheck -s sh tool tests/run.sh tests/check-includes.sh tests/check-nm.sh tests/check-debug-build.sh
 
   # Optional compile-only check for 32-bit ARM (Pi Zero 2W), where Usz is
   # 32-bit. It calls the cross compiler directly instead of going through

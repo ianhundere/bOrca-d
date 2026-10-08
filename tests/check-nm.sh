@@ -10,24 +10,32 @@
 # (never LTO or strip, which hide symbols, and never PIE, under which const
 # pointer tables show as writable), and reads each symbol's class, field 2 of
 # `nm -P`. A symbol of class B b C D d G g S s V v is writable data or bss and
-# fails the file. An object for which nm lists nothing fails too, so a check
-# that sees nothing cannot pass.
+# fails the run unless a marker covers it. An object for which nm lists
+# nothing fails too, so a check that sees nothing cannot pass.
 #
 # The canary, tests/nm/canary.c, holds one writable symbol of each class b,
 # d, B and D, each with its address escaping, so -O2 keeps them. The same
-# recipe must flag all four by name on every run; if it misses one, the check
-# is blind and the run fails.
+# recipe must flag all four by name on every run, and the marker code must
+# sort them with a built-in marker set: canary_static_* matches both
+# statics, canary_extern_init its one symbol, canary_absent nothing (an
+# XPASS), and canary_extern_zero, which no marker covers, is unmarked. If
+# any of that fails, the check is blind and the run fails.
 #
-# tests/xfail/nm-check lists the files expected to fail, one per line, as
-# `<file> <item...>`; # starts a comment. The items are the spec items the
-# fix waits for (B1, I6.2). A marked file reports XFAIL and does not fail the
-# run. A marked file that passes reports XPASS and fails the run, so the
-# series that makes it pass deletes the line in the same commit. A marker
-# never hides an empty object or a failed compile. A marker naming a file
-# outside CORE, a malformed line or a duplicate fails the run.
+# tests/xfail/nm-check lists the expected writable symbols, one marker per
+# line, as `<file> <symbol|glob> <item>`; # starts a comment. The pattern is
+# a symbol name, or a literal prefix of at least 3 characters followed by one
+# trailing * (scale_*); the item is the one spec item the fix waits for,
+# matching ^(B[1-8]|I[1-6])$ (B1, I3). Each
+# marker line reports on its own: XFAIL, naming its item and every writable
+# symbol it matched (class and name), or XPASS when it matches none, which
+# fails the run, so the series that removes a symbol deletes its line in the
+# same commit. A writable symbol that no marker of its file matches fails the
+# run as an unmarked symbol. A marker never hides an empty object or a failed
+# compile. A marker naming a file outside CORE, a malformed line, any other
+# pattern or a duplicate (file, pattern) fails the run.
 #
-# Exit status: 0 when the canary is flagged and every file is PASS or XFAIL,
-# 1 otherwise, 2 on usage or on a system other than Linux.
+# Exit status: 0 when the canary is flagged and every result is PASS or
+# XFAIL, 1 otherwise, 2 on usage or on a system other than Linux.
 set -uf
 
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -69,7 +77,7 @@ trap 'exit 130' INT TERM
 
 n_files=0 n_pass=0 n_fail=0 n_xfail=0 n_xpass=0
 
-# Markers, validated, as "<file> <items>" lines in $tmp/markers.
+# Markers, validated, as "<file> <pattern> <item>" lines in $tmp/markers.
 : >"$tmp/markers"
 if [ -f "$root/$marker_rel" ]; then
   if ! awk -v core="$core" -v name="$marker_rel" -v out="$tmp/markers" '
@@ -78,22 +86,65 @@ if [ -f "$root/$marker_rel" ]; then
     {
       sub(/#.*/, "")
       if (NF == 0) next
-      if (NF < 2) { bad("expected <file> <item...>"); next }
+      if (NF != 3) { bad("expected <file> <symbol|glob> <item>"); next }
       if (!($1 in incore)) { bad($1 " is not in CORE"); next }
-      items = ""
-      for (i = 2; i <= NF; i++) {
-        if ($i !~ /^[A-Z][0-9]+(\.[0-9]+)?$/) { bad("bad item id " $i); next }
-        items = items (i > 2 ? " " : "") $i
+      if ($2 !~ /^[A-Za-z0-9_.]+$/ &&
+          $2 !~ /^[A-Za-z0-9_.][A-Za-z0-9_.][A-Za-z0-9_.]+\*$/) {
+        bad("bad pattern " $2 " (expected a symbol name, or a prefix of at" \
+          " least 3 characters and one trailing *)"); next
       }
-      if ($1 in seen) { bad("duplicate marker for " $1); next }
-      seen[$1] = 1
-      print $1, items > out
+      if ($3 !~ /^(B[1-8]|I[1-6])$/) { bad("bad item id " $3); next }
+      if (($1 " " $2) in seen) { bad("duplicate marker for " $1 " " $2); next }
+      seen[$1 " " $2] = 1
+      print $1, $2, $3 > out
     }
     END { exit errors > 0 }
   ' "$root/$marker_rel"; then
     n_fail=$((n_fail + 1))
   fi
 fi
+
+# glob_match <symbol> <pattern>: whether the shell glob matches the symbol.
+# set -f turns off pathname expansion only; case still matches patterns.
+glob_match() {
+  # shellcheck disable=SC2254  # the pattern is a glob on purpose
+  case $1 in
+    $2) return 0 ;;
+  esac
+  return 1
+}
+
+# marked <symbol>: whether a marker in $tmp/file_markers matches it.
+marked() {
+  while read -r mk_pattern _; do
+    if glob_match "$1" "$mk_pattern"; then
+      return 0
+    fi
+  done <"$tmp/file_markers"
+  return 1
+}
+
+# matched_by <pattern>: prints the writable symbols the pattern matches, as
+# "<class> <name>, ..." in nm order; nothing when it matches none.
+matched_by() {
+  mb_list=
+  while read -r mb_class mb_name; do
+    if glob_match "$mb_name" "$1"; then
+      mb_list="$mb_list${mb_list:+, }$mb_class $mb_name"
+    fi
+  done <"$tmp/writable"
+  printf '%s' "$mb_list"
+}
+
+# names_of <matched_by output>: the same list without the classes.
+names_of() {
+  printf '%s\n' "$1" | awk -F', ' '{
+    for (i = 1; i <= NF; i++) {
+      split($i, part, " ")
+      printf "%s%s", (i > 1 ? ", " : ""), part[2]
+    }
+  }'
+}
 
 # inspect <source relative to root>: compiles it with the recipe and sets
 # status to error, empty, writable or clean; $tmp/writable then holds the
@@ -106,7 +157,8 @@ inspect() {
     status=error
     return
   fi
-  if ! nm -P "$tmp/obj.o" >"$tmp/syms" 2>"$tmp/err"; then
+  # C collation, so the symbols list in the same order on every machine.
+  if ! LC_ALL=C nm -P "$tmp/obj.o" >"$tmp/syms" 2>"$tmp/err"; then
     status=error
     return
   fi
@@ -130,56 +182,91 @@ for sym in $canary_symbols; do
     missing="$missing $sym"
   fi
 done
-if [ "$status" = writable ] && [ -z "$missing" ]; then
-  printf 'PASS  canary (detected: %s)\n' \
+why=
+case $status in
+  empty) why="nm lists no symbols for $canary_rel" ;;
+  error) why="could not compile or read $canary_rel" ;;
+  *)
+    if [ -n "$missing" ] || [ "$status" != writable ]; then
+      why="not flagged in $canary_rel:$missing"
+    fi
+    ;;
+esac
+# The marker path, through the same marked and matched_by as the CORE files.
+if [ -z "$why" ]; then
+  printf '%s B1\n' canary_static_* canary_extern_init canary_absent \
+    >"$tmp/file_markers"
+  unmarked=
+  while read -r _ name; do
+    if ! marked "$name"; then
+      unmarked="$unmarked${unmarked:+ }$name"
+    fi
+  done <"$tmp/writable"
+  statics=$(names_of "$(matched_by 'canary_static_*')")
+  extern=$(names_of "$(matched_by canary_extern_init)")
+  absent=$(matched_by canary_absent)
+  if [ "$unmarked" != canary_extern_zero ]; then
+    why="the markers left \"$unmarked\" unmarked, not canary_extern_zero"
+  elif [ "$statics" != "canary_static_init, canary_static_zero" ]; then
+    why="canary_static_* matched \"$statics\""
+  elif [ "$extern" != canary_extern_init ]; then
+    why="canary_extern_init matched \"$extern\""
+  elif [ -n "$absent" ]; then
+    why="canary_absent matched \"$absent\", not nothing"
+  fi
+fi
+if [ -z "$why" ]; then
+  printf 'PASS  canary (detected: %s; marker path: canary_extern_zero unmarked, canary_absent matches none)\n' \
     "$(awk '{ printf "%s%s %s", (NR > 1 ? ", " : ""), $1, $2 }' "$tmp/writable")"
   canary_ok=1
 else
-  case $status in
-    empty) why="nm lists no symbols for $canary_rel" ;;
-    error) why="could not compile or read $canary_rel" ;;
-    *) why="not flagged in $canary_rel:$missing" ;;
-  esac
   printf 'FAIL  canary (the check is blind: %s)\n' "$why"
   head -n 3 "$tmp/err" | sed 's/^/      /'
 fi
 
 for file in $core; do
   n_files=$((n_files + 1))
-  items=$(awk -v f="$file" '$1 == f { $1 = ""; sub(/^ /, ""); print }' "$tmp/markers")
+  awk -v f="$file" '$1 == f { print $2, $3 }' "$tmp/markers" >"$tmp/file_markers"
   inspect "$file"
   case $status in
     error)
       printf 'FAIL  %s (could not compile or read it)\n' "$file"
       head -n 3 "$tmp/err" | sed 's/^/      /'
       n_fail=$((n_fail + 1))
+      continue
       ;;
     empty)
       printf 'FAIL  %s (nm lists no symbols)\n' "$file"
       n_fail=$((n_fail + 1))
-      ;;
-    writable)
-      if [ -n "$items" ]; then
-        printf 'XFAIL %s (%s)\n' "$file" "$items"
-        n_xfail=$((n_xfail + 1))
-      else
-        printf 'FAIL  %s (writable symbols: %s)\n' "$file" \
-          "$(wc -l <"$tmp/writable" | tr -d ' ')"
-        head -n 10 "$tmp/writable" | sed 's/^/      /'
-        n_fail=$((n_fail + 1))
-      fi
-      ;;
-    clean)
-      if [ -n "$items" ]; then
-        printf 'XPASS %s (marked xfail for %s: remove the line from %s)\n' \
-          "$file" "$items" "$marker_rel"
-        n_xpass=$((n_xpass + 1))
-      else
-        printf 'PASS  %s\n' "$file"
-        n_pass=$((n_pass + 1))
-      fi
+      continue
       ;;
   esac
+  clean=1
+  # Every writable symbol needs a marker of its file.
+  while read -r class name; do
+    if ! marked "$name"; then
+      clean=0
+      printf 'FAIL  %s %s %s (unmarked symbol)\n' "$file" "$class" "$name"
+      n_fail=$((n_fail + 1))
+    fi
+  done <"$tmp/writable"
+  # Each marker line reports on its own.
+  while read -r pattern item; do
+    clean=0
+    matched=$(matched_by "$pattern")
+    if [ -n "$matched" ]; then
+      printf 'XFAIL %s %s (%s: %s)\n' "$file" "$pattern" "$item" "$matched"
+      n_xfail=$((n_xfail + 1))
+    else
+      printf 'XPASS %s %s (%s: no writable symbol matches; remove the line from %s)\n' \
+        "$file" "$pattern" "$item" "$marker_rel"
+      n_xpass=$((n_xpass + 1))
+    fi
+  done <"$tmp/file_markers"
+  if [ "$clean" = 1 ]; then
+    printf 'PASS  %s\n' "$file"
+    n_pass=$((n_pass + 1))
+  fi
 done
 
 if [ "$canary_ok" = 1 ]; then

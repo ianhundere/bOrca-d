@@ -1,8 +1,21 @@
 # Expected failures of tests/check-nm.sh (architecture spine AD-1).
-# One line per file: <file> <item...>, naming the spec items the fix waits
-# for. The series that makes the file pass deletes its line in the same
-# commit; see tests/README.md.
+# One line per (file, pattern): <file> <symbol|glob> <item>, naming the one
+# spec item the fix waits for. Each line reports XFAIL with the symbols it
+# matched, or XPASS, which fails the run, once it matches none: the series
+# that removes a symbol deletes its line in the same commit. A writable
+# symbol that no line matches fails the run. See tests/README.md.
 
-# sim.c keeps operator state, glide state and non-const tables in writable
-# statics: B1 moves the operator state out, B3 the glide state and tables.
-sim.c B1 B3
+# B1 moves the operator state of &, ; and r into a per-cell store.
+sim.c bouncer_states B1
+sim.c arp_states B1
+sim.c unique_random_state B1
+
+# B3 moves the glide state into a caller-owned struct and deletes
+# last_random_unique.
+sim.c midicc_interp_states B3
+sim.c last_random_unique B3
+
+# B3 makes sim.c's lookup tables const. These tables stay writable today
+# because scales and scales_and_chords hold their addresses.
+sim.c chord_* B3
+sim.c scale_* B3

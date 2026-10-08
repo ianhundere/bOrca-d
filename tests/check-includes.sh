@@ -20,13 +20,16 @@
 # srand is not. base.h includes <unistd.h>, so every core file sees read(),
 # write(), usleep() and the rest of it, and calling them passes this check.
 #
-# The canary, tests/includes/canary.c, includes <stdio.h>. It is scanned
-# first, the same way as a CORE file, and <stdio.h> must be reported for it
-# on every run; if it is not, the check is blind and the run fails.
+# The canary, tests/includes/canary.c, includes <stdio.h> and calls rand().
+# It is scanned first, the same way as a CORE file, and both <stdio.h> and
+# rand must be reported for it on every run; if either is not, the check is
+# blind and the run fails. The rand canary keeps that half of the check
+# proven once B1 removes rand() from sim.c and its marker.
 #
 # tests/xfail/include-check lists the expected violations, one per line, as
 # `<file> <pattern> <item...>`; # starts a comment. The items are the spec
-# items the fix waits for (B1, I6.2). A marked violation reports XFAIL and
+# items the fix waits for, each matching ^(B[1-8]|I[1-6])$ (B1, I3). A
+# marked violation reports XFAIL and
 # does not fail the run. A marker whose violation is gone reports XPASS and
 # fails the run, so the series that removes the violation deletes the line in
 # the same commit. A marker naming a file outside CORE, a malformed line or a
@@ -86,7 +89,7 @@ if [ -f "$root/$marker_rel" ]; then
       }
       items = ""
       for (i = 3; i <= NF; i++) {
-        if ($i !~ /^[A-Z][0-9]+(\.[0-9]+)?$/) { bad("bad item id " $i); next }
+        if ($i !~ /^(B[1-8]|I[1-6])$/) { bad("bad item id " $i); next }
         items = items (i > 3 ? " " : "") $i
       }
       if (($1 " " $2) in seen) { bad("duplicate marker for " $1 " " $2); next }
@@ -165,13 +168,25 @@ scan() {
   return 0
 }
 
+# The canary must be reported for both of its planted violations.
 canary_ok=0
-if scan "$canary_rel" &&
-  awk '$1 == "<stdio.h>" { found = 1 } END { exit !found }' "$tmp/found"; then
-  printf 'PASS  canary (detected: <stdio.h>)\n'
-  canary_ok=1
+canary_missing=
+if scan "$canary_rel"; then
+  for canary_pattern in '<stdio.h>' rand; do
+    if ! awk -v p="$canary_pattern" '$1 == p { found = 1 } END { exit !found }' \
+      "$tmp/found"; then
+      canary_missing="$canary_missing${canary_missing:+ and }$canary_pattern"
+    fi
+  done
+  if [ -z "$canary_missing" ]; then
+    printf 'PASS  canary (detected: <stdio.h>, rand)\n'
+    canary_ok=1
+  else
+    printf 'FAIL  canary (the check is blind: %s not reported in %s)\n' \
+      "$canary_missing" "$canary_rel"
+  fi
 else
-  printf 'FAIL  canary (the check is blind: <stdio.h> not reported in %s)\n' \
+  printf 'FAIL  canary (the check is blind: gcc could not read %s)\n' \
     "$canary_rel"
 fi
 

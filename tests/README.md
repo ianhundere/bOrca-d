@@ -30,11 +30,16 @@ case is PASS or XFAIL and no expected file is orphaned.
 
 - `<name>.args` holds extra flags appended after the defaults; a later flag
   wins, so `-t 1` in a sidecar overrides the default `-t 64`.
-- `<name>.xfail` holds the ids of the spec items whose fixes the case waits
-  for, space-separated (`B2`, or `B2 B5`). While a fix is missing the case
-  reports XFAIL and the run stays green. Once the output matches, the case
-  reports XPASS and the run fails: the commit that lands an item removes its
-  id from the marker, and deletes the file when no id is left.
+- `<name>.xfail` names the one spec item whose fix the case waits for:
+  exactly one id matching `^(B[1-8]|I[1-6])$` (`B2`). A repro that waits for
+  two items is two cases, one per item, so each flips in the commit that
+  lands its item. While the fix is missing the case reports XFAIL and the
+  run stays green. Once the output matches, the case reports XPASS and the
+  run fails: the commit that lands the item deletes the marker.
+- A marker that holds no id, anything but one such id (`TODO`, `B9`, `b2`)
+  or two ids fails the case as `FAIL <case> (bad marker: …)`, in both modes;
+  `--update` never rewrites that case's expected file, and the other cases
+  still run.
 - A marker never hides a crash. A sanitizer report in the output, a signal or
   the 60 s per-case timeout fails the run whatever the marker says, so the
   debug build must stay clean on every case. A plain non-zero exit (such as a
@@ -46,10 +51,10 @@ case is PASS or XFAIL and no expected file is orphaned.
 ### Updating expected files
 
 `tests/run.sh --update <cli>` rewrites every expected file from the current
-output, except cases that carry a `.xfail` marker, whose expected files
-describe the fixed behaviour and are written by hand. Use it when a change is
-meant to alter output; the diff of `tests/expected/` is then part of the
-review.
+output, except cases that carry a `.xfail` marker, valid or bad, whose
+expected files describe the fixed behaviour and are written by hand. Use it
+when a change is meant to alter output; the diff of `tests/expected/` is
+then part of the review.
 
 ### Adding a repro patch
 
@@ -58,18 +63,57 @@ review.
 2. Write `tests/expected/patches/<name>.events` by hand with the fixed
    behaviour (start from the current output and edit the lines the fix
    changes).
-3. Put the item id in `tests/expected/patches/<name>.xfail`.
+3. Put the one item id in `tests/expected/patches/<name>.xfail`. A repro
+   that two items change is split so that each case waits for one.
 4. Run the suite: the case must report XFAIL, not FAIL.
+
+The marked repros today are `scale_inv` (`$3CA2`, `$3CA0`) and
+`midichord_inv` (`=13CA.1`), which wait for B2, and `midichord_vel`
+(`=13Caf1`, `=13C0f1`, `=13Ca01`), which waits for B5. `midichord_inv` uses
+velocity `.` so that B5 cannot change it; CAP-7's literal `=13CAf1`, which
+both items change, belongs to B2's story. When these fixed goldens were
+written, a throwaway script derived them from the current output and
+asserted each line it edited; the script is not committed.
 
 ### Goldens that record current behaviour on purpose
 
-`r_single` and `r_shared` are replaced, not marked expected-fail, when B6
-lands: B6's exact sequence depends on the PRNG it picks, so its fixed output
-cannot be written ahead of time; B6 replaces these files and proves the
-no-repeat and permutation properties in a unit test. Until then lowercase `r`
-shuffles with glibc's unseeded `rand()`, so these two goldens hold the glibc
-stream: they pass on Linux and fail on macOS or musl, and `--seed` does not
-affect them.
+`r_single` and `r_shared` record lowercase `r` as it is today: it shuffles
+with glibc's unseeded `rand()`, so these two goldens hold the glibc stream,
+pass on Linux, fail on macOS or musl, and ignore `--seed`. They are
+replaced, not marked expected-fail, twice: B1 replaces them when it removes
+`rand()` from `sim.c` (spine AD-1), and B6 replaces them again when it fixes
+`r`. B6's exact sequence depends on the PRNG it picks, so it cannot be
+written ahead of time; B6 proves the no-repeat and permutation properties in
+a unit test.
+
+Seven characterization goldens pin, unmarked, what the operators that
+Phase 1 touches produce today, so a refactor that changes their output
+fails a case. Three are replaced, not marked, by the Phase 2 item that
+redefines their operator: `bouncer_shapes` by I3, and `arp_patterns` and the
+`;` rows of `seeded_random` by I4.
+
+| Case | Pins | `.args` | Replaced by |
+| --- | --- | --- | --- |
+| `bouncer_shapes` | `&` shapes 0–7 at rate 5 over `0`–`z`, an end below the start, a partial range, rate `.`, shape `z`, a `D` bang that resets the phase every 7 ticks, and a rate and a shape that a `C` clock changes, each change resetting the phase | none | I3 |
+| `arp_patterns` | `;` ranges 1–4 with every non-random pattern, ranges `0` and `z`, a bang every 3 ticks, and a clocked pattern change that restarts the step | none | I4 |
+| `seeded_random` | `R` with a lowercase, an uppercase and a `0` max, and `;` pattern `c`, under a non-zero seed | `--seed 7` | I4 (its `;` rows) |
+| `cc_instant` | `!` at rate `.` on CC 1 and CC 74 with values `0`, `g`, `v` and `w` (clamped to 127), sent again on every tick; a channel above 15 that sends nothing, a hundreds digit (CC 100), and controller 130 clamped to 127 | `-t 2` | none |
+| `pitch_bend` | `?` with MSB and LSB at `0`, `z` and between, and a channel above 15 that sends nothing | `-t 2` | none |
+| `scale_selectors` | `$` with every digit and lowercase selector at degrees 0, 2, 5 and 9 (with `$3Ca2` and `$3C02`), other roots, no octave, input octave `a` clamped to 9, and a result above octave 9 that writes nothing | `-t 1` | none |
+| `chord_notes` | `=` with every digit and lowercase chord at velocity `.` and at `z`, an octave-9 chord that drops the notes above 127, input octave `a` clamped to 9, a channel above 15, and `:13Cf1` | `-t 1` | none |
+
+Their patches avoid what Phase 1 changes on purpose: no lowercase `r`
+operator (B1 changes it; `r` appears only as a `$` or `=` selector, which
+those operators lock), no uppercase `$` or `=` selector (B2 changes them),
+and no `=` velocity other than `.` or `z`, which give 127 before and after
+B5. Every `&` cell keeps y × width + x below 4096, because `&` indexes its
+state with no bounds check before B1; `;` returns early from 4096 on, so its
+cells stay below it too, or they would output nothing. Each case was
+captured with `--update`. When the cases were written, a throwaway model of
+the operators' source checked each cell; it is not committed.
+
+The `R` and `;` pattern `c` goldens assume a 64-bit `Usz`: their hashes
+differ where `Usz` is 32-bit, as on armhf, whose CI job only compiles.
 
 `j_banged_under_j` and `y_banged_right_of_y` were captured before the
 upstream "Allow wires to grow" cherry-pick (P0.1) and replaced by it; together
@@ -134,7 +178,10 @@ UBSAN_OPTIONS=halt_on_error=1 nice -n 19 taskset -c 0-2 build/debug/unit_tests
 
 `-DUNIT_TESTS_CANARY` (through `CFLAGS_EXTRA`) adds
 `unit_check_canary`, a test whose check is false; CI uses it to prove the
-runner reports a failure and exits 1. `./tool build test` stops with an
+runner reports a failure and exits 1. `-DUNIT_TESTS_UNREGISTERED_CANARY`
+defines `test_unregistered_canary` with its own prototype and in no list,
+so it builds but never runs; CI uses it to prove that
+`tests/check-debug-build.sh` names it. `./tool build test` stops with an
 error if `tests/unit/main.c`, the runner, is missing.
 
 ### Adding a unit test
@@ -150,7 +197,9 @@ error if `tests/unit/main.c`, the runner, is missing.
    list for its adapter flag (`PORTMIDI_TESTS_ALL`, `ALSA_TESTS_ALL`).
    `tests.h` generates every test's prototype from these lists, outside any
    `#ifdef`, and makes `-Wmissing-prototypes` an error, so a `test_<name>`
-   that no list names fails to build instead of never running. Make helper
+   that no list names fails to build instead of never running. A test that
+   declares its own prototype gets past that, and
+   `tests/check-debug-build.sh` (below) catches it by count. Make helper
    functions `static`.
 4. An adapter test sits inside `#ifdef FEAT_<flag>` in its file and may
    include that backend's header; a core test includes only core headers and
@@ -176,31 +225,48 @@ canary is detected and every result is PASS or XFAIL.
   `#if 0` block is reported, and `srand` is not; `base.h` includes
   `<unistd.h>`, so `read()`, `write()`, `usleep()` and the rest of it reach
   every core file and pass the check. The canary `tests/includes/canary.c`
-  includes `<stdio.h>`; it is scanned first, the same way as a CORE file,
-  and must be reported, or the check is blind and the run fails.
+  includes `<stdio.h>` and calls `rand()`; it is scanned first, the same
+  way as a CORE file, and both must be reported, or the check is blind and
+  the run fails. The `rand` half keeps that part of the check proven after
+  B1 removes `rand()` from `sim.c` and deletes its marker.
 - `tests/check-nm.sh` (spine AD-1) compiles each CORE file on its own with
-  `gcc -c -std=c99 -O2 -DNDEBUG -g0 -fno-pie -no-pie -fno-lto` and fails it
-  when `nm -P` lists a writable symbol (class `B b C D d G g S s V v`) or no
-  symbol at all. The canary `tests/nm/canary.c` holds one writable symbol
-  of each class `b`, `d`, `B` and `D`, each with its address escaping; the
-  check must flag all four by name on every run, or it is blind and the run
-  fails. The script is Linux/ELF only: elsewhere it exits 2.
+  `gcc -c -std=c99 -O2 -DNDEBUG -g0 -fno-pie -no-pie -fno-lto` and fails
+  each writable symbol (class `B b C D d G g S s V v`) that `nm -P` lists
+  and no marker covers, and a file with no symbol at all. Markers name a
+  symbol or a prefix, so a new writable global in `sim.c` fails unless a
+  marker matches its name; one named `chord_*` or `scale_*` joins that
+  XFAIL line instead. The canary `tests/nm/canary.c` holds one writable
+  symbol of each class `b`, `d`, `B` and `D`, each with its address
+  escaping. On every run the check must flag all four by name, and its
+  marker code must sort them with a built-in marker set:
+  `canary_static_*` matches both statics, `canary_extern_init` its one
+  symbol, `canary_absent` nothing (the XPASS path), and
+  `canary_extern_zero`, which no marker covers, is reported unmarked.
+  Otherwise the check is blind and the run fails. Symbols are listed in C
+  collation. The script is Linux/ELF only: elsewhere it exits 2.
 
-Today they print:
+Today they print, on the uConsole's gcc 12.2 (the `chord_*` line lists all
+62 chord tables; it is cut short here):
 
 ```text
 $ tests/check-includes.sh
-PASS  canary (detected: <stdio.h>)
+PASS  canary (detected: <stdio.h>, rand)
 PASS  gbuffer.c
 PASS  vmio.c
 XFAIL sim.c rand (B1)
 include check: 3 files, 2 pass, 1 xfail, 0 fail, 0 xpass; canary detected
 $ tests/check-nm.sh
-PASS  canary (detected: D canary_extern_init, B canary_extern_zero, d canary_static_init, b canary_static_zero)
+PASS  canary (detected: D canary_extern_init, B canary_extern_zero, d canary_static_init, b canary_static_zero; marker path: canary_extern_zero unmarked, canary_absent matches none)
 PASS  gbuffer.c
 PASS  vmio.c
-XFAIL sim.c (B1 B3)
-nm check: 3 files, 2 pass, 1 xfail, 0 fail, 0 xpass; canary detected
+XFAIL sim.c bouncer_states (B1: b bouncer_states)
+XFAIL sim.c arp_states (B1: b arp_states)
+XFAIL sim.c unique_random_state (B1: b unique_random_state)
+XFAIL sim.c midicc_interp_states (B3: b midicc_interp_states)
+XFAIL sim.c last_random_unique (B3: D last_random_unique)
+XFAIL sim.c chord_* (B3: d chord_aug, d chord_aug7, d chord_aug7_inv, … d chord_sus4_rich)
+XFAIL sim.c scale_* (B3: d scale_dorian, d scale_fifths, d scale_hirajoshi, d scale_iwato, d scale_lydian, d scale_major, d scale_minor, d scale_mixolydian, d scale_pentatonic, d scale_tetratonic)
+nm check: 3 files, 2 pass, 7 xfail, 0 fail, 0 xpass; canary detected
 ```
 
 In the summaries, `pass` counts clean files, and `xfail`, `fail` and `xpass`
@@ -214,17 +280,61 @@ count results, so one file can add several.
 | Marker file | Line format | Today |
 | --- | --- | --- |
 | `tests/xfail/include-check` | `<file> <pattern> <item...>`, where the pattern is `rand`, `<name.h>` or `"name.h"` | `sim.c rand B1` |
-| `tests/xfail/nm-check` | `<file> <item...>` | `sim.c B1 B3` |
+| `tests/xfail/nm-check` | `<file> <symbol\|glob> <item>`, where the pattern is a symbol name, or a literal prefix of at least 3 characters followed by one trailing `*` (`chord_*`) | `bouncer_states`, `arp_states` and `unique_random_state` for B1; `midicc_interp_states`, `last_random_unique`, `chord_*` and `scale_*` for B3 |
 
-- The items are the spec items the fix waits for, matching
-  `[A-Z][0-9]+(\.[0-9]+)?` (`B1`, `I6.2`). A marked violation reports XFAIL
-  and the run stays green.
+- The items are the spec items the fix waits for, each matching
+  `^(B[1-8]|I[1-6])$` (`B1`, `I3`); an nm marker names exactly one. A
+  marked violation reports XFAIL and the run stays green.
 - A marker whose violation is gone reports XPASS and fails the run: the
   series that turns a check green deletes the marker line in the same
   commit.
-- A marker that names a file outside CORE, a malformed line or a duplicate
-  fails the run. An nm marker never hides an object with no symbols or a
-  failed compile.
+- Each nm marker line reports on its own: XFAIL with its item and every
+  writable symbol it matched (class and name), or XPASS once it matches
+  none, so B1 and B3 each remove the lines of the symbols they delete. A
+  writable symbol that no line of its file matches fails as
+  `FAIL <file> <class> <name> (unmarked symbol)`.
+- The `chord_*` and `scale_*` globs cover the 72 tables that stay writable
+  because `scales` and `scales_and_chords` hold their addresses; B3 makes
+  them `const`. The tables nothing addresses show as `r` only because gcc
+  places never-written statics in read-only data. That is not proof that
+  they are `const` at every pointer level, as AD-1 requires: this `-O2`
+  recipe cannot show it, so B3 checks the declarations. The XFAIL lines
+  name every matched symbol, so a CI log records the runner gcc's list,
+  which may differ from the uConsole's; that log is the evidence for any
+  marker change.
+- A marker that names a file outside CORE, a malformed line, any other nm
+  pattern (`*_*`, `_*`, `sc*`, `sca?`) or a duplicate (file, pattern) fails
+  the run. An nm marker never hides an object with no symbols or a failed
+  compile.
+
+### Debug-build check
+
+`tests/check-debug-build.sh <binary> [runner-log]` fails a debug binary
+whose symbol table (`nm`) lacks `__asan_init` or a `__ubsan_handle_*`
+symbol, each of class `U` (gcc's shared runtimes) or `T` (a runtime linked
+in statically, as clang does): `tool` only warns when it cannot detect the
+compiler, and then builds without sanitizers, which no other step would
+notice. `__ubsan_default_options`, which the runner defines, never counts.
+Given the log of one `build/debug/unit_tests` run, it also fails unless
+the run ended with `<n> tests, 0 failed`, the log holds no sanitizer line
+(`Sanitizer` or `runtime error:`, including a LeakSanitizer report printed
+after the summary), every `T test_*` function the binary defines is
+reported by `ok` or `FAIL` (it names each one that is not), no test is
+reported twice, and `<n>` equals the number of `T test_*` functions. A test
+registered twice cannot hide an unregistered one by keeping the count
+equal. Release and unsigned-char binaries are exempt and never checked:
+they link with `-flto -s`, so `nm` lists nothing and the script fails them,
+as it fails any stripped binary. The script is Linux/ELF only: macOS
+prefixes symbol names with an underscore, so elsewhere it exits 2.
+
+```sh
+nice -n 19 taskset -c 0-2 tests/check-debug-build.sh build/debug/cli
+UBSAN_OPTIONS=halt_on_error=1 nice -n 19 taskset -c 0-2 build/debug/unit_tests 2>&1 | tee /tmp/unit_tests.log
+nice -n 19 taskset -c 0-2 tests/check-debug-build.sh build/debug/unit_tests /tmp/unit_tests.log
+```
+
+Each `--portmidi` or `--alsa` test build overwrites
+`build/debug/unit_tests`, so check each runner right after its own run.
 
 ## CI
 
@@ -234,13 +344,24 @@ count results, so one file can add several.
 
 - **build** (pinned `ubuntu-24.04` and `ubuntu-24.04-arm`, never `-latest`):
   first checks that `CFLAGS_EXTRA` reaches the compiler, then builds the
-  debug and release `cli` with `CFLAGS_EXTRA=-Werror` and runs the golden
-  suite on both. It then runs `tests/check-includes.sh` and
-  `tests/check-nm.sh`, which need no build, builds and runs the debug unit
-  tests without and with `--portmidi` and with `--alsa` (ASan, UBSan with
-  `halt_on_error=1`; the `--portmidi` run fails unless it prints
+  debug and release `cli` with `CFLAGS_EXTRA=-Werror`, checks the debug
+  `cli` with `tests/check-debug-build.sh`, and runs the golden suite on
+  both. It then runs `tests/check-includes.sh` and `tests/check-nm.sh`,
+  which need no build, builds and runs the debug unit tests without and
+  with `--portmidi` and with `--alsa` (ASan, UBSan with `halt_on_error=1`;
+  the `--portmidi` run fails unless it prints
   `ok portmidi_error_text_and_filters`, the `--alsa` run unless it prints
-  `ok alsa_version_and_open_modes`). It checks that `tool` refuses
+  `ok alsa_version_and_open_modes`), and runs
+  `tests/check-debug-build.sh` on each runner with its log before the next
+  build replaces it. Three steps prove the checks' failure paths on every
+  run: `tests/run.sh` must fail a throwaway `pitch_bend.xfail` holding
+  `TODO`, then `B2 B5`, as a bad marker, and `--update` must leave an
+  edited `pitch_bend.events` alone, after which the tree must be clean;
+  `tests/check-debug-build.sh` must exit 1 on a program built with plain
+  `cc`, naming both sanitizers; and a debug runner built with
+  `-DUNIT_TESTS_UNREGISTERED_CANARY`, which defines
+  `test_unregistered_canary` with its own prototype and in no list, must
+  make it exit 1, naming that test. It checks that `tool` refuses
   `--alsa --portmidi` with `Choose ALSA or PortMidi`, then builds the debug
   `orca`, the debug `orca` with PortMidi (`make debug`) and with ALSA, the
   release `orca` without mouse support, the release `orca` with PortMidi,
@@ -255,7 +376,7 @@ count results, so one file can add several.
   `cli`, and the release unit tests, both built with `-funsigned-char`;
   checks that a release runner built with `-DUNIT_TESTS_CANARY` exits 1 and
   prints `FAIL unit_check_canary:`; and runs
-  `shellcheck -s sh tool tests/run.sh tests/check-includes.sh tests/check-nm.sh`.
+  `shellcheck -s sh tool tests/run.sh tests/check-includes.sh tests/check-nm.sh tests/check-debug-build.sh`.
 - **armhf** (`ubuntu-24.04`, optional): only cross-compiles, with
   `arm-linux-gnueabihf-gcc`, each file in the union of `./tool sources cli`
   and `./tool sources test`; a red result does not fail the run.
@@ -265,17 +386,20 @@ reproduce a red `build` or `unsigned-char` step on the uConsole:
 
 ```sh
 CFLAGS_EXTRA=-Werror nice -n 19 taskset -c 0-2 ./tool build -d cli
+nice -n 19 taskset -c 0-2 tests/check-debug-build.sh build/debug/cli
 nice -n 19 taskset -c 0-2 tests/run.sh build/debug/cli
 CFLAGS_EXTRA=-Werror nice -n 19 taskset -c 0-2 ./tool build cli
 nice -n 19 taskset -c 0-2 tests/run.sh build/cli
 nice -n 19 taskset -c 0-2 tests/check-includes.sh
 nice -n 19 taskset -c 0-2 tests/check-nm.sh
 CFLAGS_EXTRA=-Werror nice -n 19 taskset -c 0-2 ./tool build -d test
-UBSAN_OPTIONS=halt_on_error=1 nice -n 19 taskset -c 0-2 build/debug/unit_tests
+UBSAN_OPTIONS=halt_on_error=1 nice -n 19 taskset -c 0-2 build/debug/unit_tests 2>&1 | tee /tmp/unit_tests.log
+nice -n 19 taskset -c 0-2 tests/check-debug-build.sh build/debug/unit_tests /tmp/unit_tests.log
 CFLAGS_EXTRA=-Werror nice -n 19 taskset -c 0-2 ./tool build test
 nice -n 19 taskset -c 0-2 build/unit_tests
 CFLAGS_EXTRA=-Werror nice -n 19 taskset -c 0-2 ./tool build -d --alsa test
-UBSAN_OPTIONS=halt_on_error=1 nice -n 19 taskset -c 0-2 build/debug/unit_tests
+UBSAN_OPTIONS=halt_on_error=1 nice -n 19 taskset -c 0-2 build/debug/unit_tests 2>&1 | tee /tmp/unit_tests.log
+nice -n 19 taskset -c 0-2 tests/check-debug-build.sh build/debug/unit_tests /tmp/unit_tests.log
 CFLAGS_EXTRA=-Werror nice -n 19 taskset -c 0-2 ./tool build -d orca
 CFLAGS_EXTRA=-Werror nice -n 19 taskset -c 0-2 ./tool build --no-mouse orca
 CFLAGS_EXTRA=-Werror nice -n 19 taskset -c 0-2 ./tool build -d --alsa orca
