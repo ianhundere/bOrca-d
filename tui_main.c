@@ -23,7 +23,6 @@
 #include <alsa/asoundlib.h>
 #include <errno.h>
 #include <signal.h>
-#include <time.h>
 
 // SIGTERM, SIGHUP and SIGINT quit gracefully in --alsa builds: the handler
 // only sets this flag, which the event loop checks (architecture spine AD-3).
@@ -80,10 +79,10 @@ fprintf(stderr,
 "    $BORCA_ALSA_CLIENT_NAME when that is set and non-empty, with one\n"
 "    port named MIDI out. The client opens at startup even with\n"
 "    --osc-midi-bidule, whose output then replaces it. If the sequencer\n"
-"    cannot be opened, or another client still has the name after 1 s,\n"
-"    orca exits with status 1. SIGTERM, SIGHUP and SIGINT quit cleanly,\n"
-"    stopping playback first, unless the signal was already ignored when\n"
-"    orca started.\n"
+"    cannot be opened, or another client already has the name (checked\n"
+"    once, at startup), orca exits with status 1. SIGTERM, SIGHUP and\n"
+"    SIGINT quit cleanly, stopping playback first, unless the signal was\n"
+"    already ignored when orca started.\n"
 );
 #endif
 } // clang-format on
@@ -912,21 +911,17 @@ staticni int alsa_ctx_open(Alsa_ctx *ctx) {
     return err;
   char const *client_name = alsa_client_name();
   // Two clients with one name make the appliance router refuse to route
-  // either, so never take a name in use. A previous instance may still be
-  // exiting (a service restart): re-check every 100 ms for up to 1 s. This
-  // runs once, at startup.
-  for (int tries = 0;; ++tries) {
-    err = alsa_client_name_taken(seq, client_name);
-    if (err < 0)
-      goto fail;
-    if (err == 0)
-      break;
-    if (tries == 10) {
-      err = -EEXIST;
-      goto fail;
-    }
-    struct timespec pause = {0, 100 * 1000 * 1000};
-    nanosleep(&pause, NULL);
+  // either, so refuse a name another client holds. One check, no wait: the
+  // kernel drops a client when its process exits, and borca-tty.service
+  // (KillMode=control-group) starts a new instance only after the old one
+  // has stopped; if the name is still held, its Restart=always retries.
+  // Two instances started at the same moment can both pass this check.
+  err = alsa_client_name_taken(seq, client_name);
+  if (err < 0)
+    goto fail;
+  if (err > 0) {
+    err = -EEXIST;
+    goto fail;
   }
   err = snd_seq_set_client_name(seq, client_name);
   if (err < 0)
