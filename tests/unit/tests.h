@@ -22,7 +22,14 @@
   X(sim_far_cell)                                                              \
   X(sim_two_r_permutations)                                                    \
   X(sim_preview_isolation)                                                     \
-  X(sim_clear_and_prune)
+  X(sim_clear_and_prune)                                                       \
+  X(tick_cap9_resume_after_edit)                                               \
+  X(tick_cap9_resume_without_edit)                                             \
+  X(tick_wire_order)                                                           \
+  X(tick_glide_engine_order)                                                   \
+  X(tick_release_all)                                                          \
+  X(tick_run_vm_clears_list)                                                   \
+  X(tick_len_us)
 
 // The full list for each adapter FEAT_ flag, and for the runner's failure
 // canary, whatever the flags.

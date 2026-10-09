@@ -293,6 +293,26 @@ make clean       # removes build/
 
 Changes since boorch/bOrca `4f349cd` that alter how an existing patch plays, change what goes out over MIDI, or break the public `orca_run` API, newest first. Each entry has a one-line title, says what changed and why, shows a before/after example, and points at an updated or new patch under `examples/`. The id in brackets at the end of an entry (`P0.1`, `B2`, …) is the item in the fork's implementation spec, the same vocabulary the `.xfail` markers under `tests/` use.
 
+### Resuming after a pause no longer re-sends the paused grid's notes and CCs
+
+While paused, bOrca runs the patch once on a throwaway copy whenever the grid needs redrawing, to colour the operators and their ports. That pass wrote its events into a list that the next tick also sent, and every tick asks for a redraw, so the first tick after every resume sent them too, edit or not: each note played twice (note-on, note-off, note-on), each CC and pitch bend went out twice, and a `!` with an interpolation rate registered its glide a second time. Two changes fix it, so the first tick after resume sends only that tick's events:
+
+- The redraw writes into its own event list, which is never sent. No unit test drives the TUI's redraw, so the manual `aseqdump` check below covers this.
+- The tick clears the glide engine's list before each engine run, so nothing left in it goes out. The unit test `tick_cap9_resume_after_edit` in `tests/unit/test_tick.c` covers this: it hands a tick, as its engine list, the list a preview filled, and compares what goes out with a run that had no preview.
+
+Nothing else about what goes out, or its order, changes.
+
+For builds that list the sources themselves: the tick and the sustained-note list moved out of `tui_main.c` and `osc_out.c` into the new `tick.c`, which joins the core sources, and `Susnote`, `Susnote_list` and the `susnote_list_*` functions moved from `osc_out.h` to `tick.h`.
+
+Before → after, the first tick after resuming a patch whose `D1` bangs `:03C.1`, as `aseqdump` shows it:
+
+```
+before: Note on 36, Note off 36, Note on 36
+after:  Note on 36
+```
+
+No example patch: any patch with a note operator shows it. (B4)
+
 ### `orca_run` takes a context with a caller-owned operator-state store, and `&`, `;` and `r` keep their state per cell
 
 API break: `orca_run` keeps its seven arguments and takes an eighth, `Orca_run_ctx const *ctx` (`sim.h`). Its one field, `opstate`, is required and points at an `Opstate_store` (`opstate.h`) that the caller sets up with `opstate_init`, keeps across ticks and releases with `opstate_free`. Every existing caller must change. The store holds the per-cell state of `&`, `;` and lowercase `r`, which used to live in fixed-size arrays and one global shuffle inside `sim.c`; the arrays overflowed or gave up on large grids, and the state never reset on open.

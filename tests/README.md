@@ -154,7 +154,9 @@ without `UBSAN_OPTIONS`. CI and the commands above still set
 runner's defaults.
 
 `tool` defines the CORE list once (today `gbuffer.c vmio.c sim.c
-opstate.c`; the other extracted core modules and `tick.c` join it later).
+opstate.c tick.c`; the other extracted core modules join it later). `tick.c`
+is shell code, the tick body and the sustained-note list, held to the core
+rules (spine AD-14), so the unit tests can drive it through a recording sink.
 `cli`, `orca` and `test` link all of it, and
 `./tool sources <core|cli|orca|test>` prints a list, one file per line, so
 the checks below and the CI `armhf` job read the same lists.
@@ -259,7 +261,8 @@ PASS  gbuffer.c
 PASS  vmio.c
 PASS  sim.c
 PASS  opstate.c
-include check: 4 files, 4 pass, 0 xfail, 0 fail, 0 xpass; canary detected
+PASS  tick.c
+include check: 5 files, 5 pass, 0 xfail, 0 fail, 0 xpass; canary detected
 $ tests/check-nm.sh
 PASS  canary (detected: D canary_extern_init, B canary_extern_zero, d canary_static_init, b canary_static_zero; marker path: canary_extern_zero unmarked, canary_absent matches none)
 PASS  gbuffer.c
@@ -269,7 +272,8 @@ XFAIL sim.c last_random_unique (B3: D last_random_unique)
 XFAIL sim.c chord_* (B3: d chord_aug, d chord_aug7, d chord_aug7_inv, … d chord_sus4_rich)
 XFAIL sim.c scale_* (B3: d scale_dorian, d scale_fifths, d scale_hirajoshi, d scale_iwato, d scale_lydian, d scale_major, d scale_minor, d scale_mixolydian, d scale_pentatonic, d scale_tetratonic)
 PASS  opstate.c
-nm check: 4 files, 3 pass, 4 xfail, 0 fail, 0 xpass; canary detected
+PASS  tick.c
+nm check: 5 files, 4 pass, 4 xfail, 0 fail, 0 xpass; canary detected
 ```
 
 In the summaries, `pass` counts clean files, and `xfail`, `fail` and `xpass`

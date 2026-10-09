@@ -7,6 +7,7 @@
 #include "sim.h"
 #include "sysmisc.h"
 #include "term_util.h"
+#include "tick.h"
 #include "tooltips.h"
 #include "vmio.h"
 #include <getopt.h>
@@ -33,6 +34,14 @@ static void alsa_request_shutdown(int signo) {
   alsa_shutdown_requested = 1;
 }
 #endif
+
+// Microseconds since stm_setup(), as a U64: the clock for core seams
+// (architecture spine AD-13), and the only clock read this series adds; the
+// existing stm_now() reads are unchanged. stm_now() returns nanoseconds on
+// every platform (sokol_time.h:169-185), so this divides in integer
+// arithmetic rather than calling stm_us(), which goes through a double. B3's
+// engine poll is its first caller; until then it is unused.
+ORCA_OK_IF_UNUSED static U64 now_us(void) { return stm_now() / 1000; }
 
 #if NCURSES_VERSION_PATCH < 20081122
 int _nc_has_mouse(void);
@@ -1159,14 +1168,21 @@ typedef struct {
   Field clipboard_field;
   Mbuf_reusable mbuf_r;
   Undo_history undo_hist;
+  // The three event lists (AD-12). oevent_list is the tick list: the VM's
+  // events on each tick, sent, and shown by Ctrl+E. scratch_oevent_list is
+  // the paused re-mark's (the preview's) and is never sent.
+  // engine_oevent_list is the glide engine's output, cleared before each run
+  // and then sent.
   Oevent_list oevent_list;
   Oevent_list scratch_oevent_list;
+  Oevent_list engine_oevent_list;
   Susnote_list susnote_list;
   Ged_cursor ged_cursor;
   Usz tick_num;
   Usz ruler_spacing_y, ruler_spacing_x;
   Ged_input_mode input_mode;
   Usz bpm;
+  U64 tick_len; // one tick at bpm, in microseconds; set with bpm (AD-14)
   U64 clock;
   double accum_secs;
   double time_to_next_note_off;
@@ -1190,6 +1206,13 @@ typedef struct {
   bool is_hud_visible : 1;
 } Ged;
 
+// Every write of the tempo goes through here, so tick_len always matches it.
+// Nothing reads tick_len until B3's glide engine.
+static void ged_set_bpm(Ged *a, Usz bpm) {
+  a->bpm = bpm;
+  a->tick_len = tick_len_us(bpm);
+}
+
 static void ged_init(Ged *a, Usz undo_limit, Usz init_bpm, Usz init_seed) {
   field_init(&a->field);
   field_init(&a->scratch_field);
@@ -1200,12 +1223,13 @@ static void ged_init(Ged *a, Usz undo_limit, Usz init_bpm, Usz init_seed) {
   undo_history_init(&a->undo_hist, undo_limit);
   oevent_list_init(&a->oevent_list);
   oevent_list_init(&a->scratch_oevent_list);
+  oevent_list_init(&a->engine_oevent_list);
   susnote_list_init(&a->susnote_list);
   ged_cursor_init(&a->ged_cursor);
   a->tick_num = 0;
   a->ruler_spacing_y = a->ruler_spacing_x = 8;
   a->input_mode = Ged_input_mode_normal;
-  a->bpm = init_bpm;
+  ged_set_bpm(a, init_bpm);
   a->clock = 0;
   a->accum_secs = 0.0;
   a->time_to_next_note_off = 1.0;
@@ -1239,6 +1263,7 @@ static void ged_deinit(Ged *a) {
   undo_history_deinit(&a->undo_hist);
   oevent_list_deinit(&a->oevent_list);
   oevent_list_deinit(&a->scratch_oevent_list);
+  oevent_list_deinit(&a->engine_oevent_list);
   susnote_list_deinit(&a->susnote_list);
   if (a->oosc_dev)
     oosc_dev_destroy(a->oosc_dev);
@@ -1312,34 +1337,63 @@ staticni void send_midi_3bytes(Oosc_dev *oosc_dev, Midi_mode const *midi_mode,
   }
 }
 
-static void send_midi_chan_msg(Oosc_dev *oosc_dev, Midi_mode const *midi_mode,
-                               int type /*0..15*/, int chan /*0.. 15*/,
-                               int byte1 /*0..127*/, int byte2 /*0..127*/) {
-  send_midi_3bytes(oosc_dev, midi_mode, type << 4 | chan, byte1, byte2);
+// The send sink (AD-14) over the backend dispatch above. tick.c sends every
+// event through it, and the shell sends its own F8, FA and FC through it.
+// Each call reads the OSC device and the MIDI mode as they are at that
+// moment: both change at runtime (the PortMidi output menu, the OSC form,
+// ged_clear_osc_udp).
+static void ged_sink_midi3(void *u, int status, int d1, int d2) {
+  Ged *a = u;
+  send_midi_3bytes(a->oosc_dev, &a->midi_mode, status, d1, d2);
 }
 
-static void send_midi_byte(Oosc_dev *oosc_dev, Midi_mode const *midi_mode,
-                           int x) {
+static void ged_sink_midi1(void *u, int byte) {
+  Ged *a = u;
   // PortMidi wants 0 and 0 for the unused bytes. Likewise, Bidule's
   // MIDI-via-OSC won't accept the message unless there are at least all 3
   // bytes, with the second 2 set to zero.
-  send_midi_3bytes(oosc_dev, midi_mode, x, 0, 0);
+  send_midi_3bytes(a->oosc_dev, &a->midi_mode, byte, 0, 0);
 }
 
-staticni void //
-send_midi_note_offs(Oosc_dev *oosc_dev, Midi_mode *midi_mode,
-                    Susnote const *start, Susnote const *end) {
-  for (; start != end; ++start) {
-#if 0
-    float under = start->remaining;
-    if (under < 0.0) {
-      fprintf(stderr, "cutoff slop: %f\n", under);
+static void ged_sink_osc(void *u, Oevent const *e) {
+  Ged *a = u;
+  switch ((Oevent_types)e->any.oevent_type) {
+  case Oevent_type_osc_ints: {
+    // kinda lame
+    if (!a->oosc_dev)
+      break;
+    Oevent_osc_ints const *eo = &e->osc_ints;
+    char path[] = {'/', eo->glyph, '\0'};
+    I32 ints[ORCA_ARRAY_COUNTOF(eo->numbers)];
+    Usz nnum = eo->count;
+    for (Usz inum = 0; inum < nnum; ++inum) {
+      ints[inum] = eo->numbers[inum];
     }
-#endif
-    U16 chan_note = start->chan_note;
-    send_midi_chan_msg(oosc_dev, midi_mode, 0x8, chan_note >> 8,
-                       chan_note & 0xFF, 0);
+    oosc_send_int32s(a->oosc_dev, path, ints, nnum);
+    break;
   }
+  case Oevent_type_udp_string:
+    // Nothing in the bOrca dialect emits UDP; the upstream dialect restores it.
+    break;
+  case Oevent_type_midi_note:
+  case Oevent_type_midi_cc:
+  case Oevent_type_midi_cc_interpolated:
+  case Oevent_type_midi_pb:
+    break; // never passed here: tick.c sends these as MIDI
+  }
+}
+
+static Tick_sink ged_sink(Ged *a) {
+  return (Tick_sink){.u = a,
+                     .midi3 = ged_sink_midi3,
+                     .midi1 = ged_sink_midi1,
+                     .osc = ged_sink_osc};
+}
+
+// Sends one byte, such as the beat clock's F8, FA or FC, through the sink.
+static void ged_send_midi_byte(Ged *a, int byte) {
+  Tick_sink const sink = ged_sink(a);
+  sink.midi1(sink.u, byte);
 }
 
 static void send_control_message(Oosc_dev *oosc_dev, char const *osc_address) {
@@ -1357,181 +1411,9 @@ static void send_num_message(Oosc_dev *oosc_dev, char const *osc_address,
   oosc_send_int32s(oosc_dev, osc_address, nums, ORCA_ARRAY_COUNTOF(nums));
 }
 
-staticni void apply_time_to_sustained_notes(Oosc_dev *oosc_dev,
-                                            Midi_mode *midi_mode,
-                                            double time_elapsed,
-                                            Susnote_list *susnote_list,
-                                            double *next_note_off_deadline) {
-  Usz start_removed, end_removed;
-  susnote_list_advance_time(susnote_list, time_elapsed, &start_removed,
-                            &end_removed, next_note_off_deadline);
-  if (ORCA_UNLIKELY(start_removed != end_removed)) {
-    Susnote const *restrict susnotes_off = susnote_list->buffer;
-    send_midi_note_offs(oosc_dev, midi_mode, susnotes_off + start_removed,
-                        susnotes_off + end_removed);
-  }
-}
-
 staticni void ged_stop_all_sustained_notes(Ged *a) {
-  Susnote_list *sl = &a->susnote_list;
-  send_midi_note_offs(a->oosc_dev, &a->midi_mode, sl->buffer,
-                      sl->buffer + sl->count);
-  susnote_list_clear(sl);
-  a->time_to_next_note_off = 1.0;
-}
-
-// The way orca handles MIDI sustains, timing, and overlapping note-ons (plus
-// the 'mono' thing being added) has changed multiple times over time. Now we
-// are in a situation where this function is a complete mess and needs an
-// overhaul. If you see something in the function below and think, "wait, that
-// seems redundant/weird", that's because it is, not because there's a good
-// reason.
-
-staticni void send_output_events(Oosc_dev *oosc_dev, Midi_mode *midi_mode,
-                                 Usz bpm, Susnote_list *susnote_list,
-                                 Oevent const *events, Usz count, Usz tick_num) {
-  enum { Midi_on_capacity = 512 };
-  typedef struct {
-    U8 channel;
-    U8 note_number;
-    U8 velocity;
-  } Midi_note_on;
-  typedef struct {
-    U8 note_number;
-    U8 velocity;
-    U8 duration;
-  } Midi_mono_on;
-  Midi_note_on midi_note_ons[Midi_on_capacity];
-  Midi_mono_on midi_mono_ons[16]; // Keep only a single one per channel
-  Susnote new_susnotes[Midi_on_capacity];
-  Usz midi_note_count = 0;
-  Usz monofied_chans = 0; // bitset of channels with new mono notes
-  double frame_secs = 60.0 / (double)bpm / 4.0;
-
-  for (Usz i = 0; i < count; ++i) {
-    Oevent const *e = events + i;
-    switch ((Oevent_types)e->any.oevent_type) {
-    case Oevent_type_midi_note: {
-      if (midi_note_count == Midi_on_capacity)
-        break;
-      Oevent_midi_note const *em = &e->midi_note;
-      Usz note_number = (Usz)(12u * em->octave + em->note);
-      if (note_number > 127)
-        note_number = 127;
-      Usz channel = em->channel;
-      if (channel > 15)
-        break;
-      if (em->mono) {
-        // 'mono' note-ons are strange. The more typical branch you'd expect to
-        // see, where you can play multiple notes per channel, is below.
-        monofied_chans |= 1u << (channel & 0xFu);
-        midi_mono_ons[channel] = (Midi_mono_on){.note_number = (U8)note_number,
-                                                .velocity = em->velocity,
-                                                .duration = em->duration};
-      } else {
-        midi_note_ons[midi_note_count] =
-            (Midi_note_on){.channel = (U8)channel,
-                           .note_number = (U8)note_number,
-                           .velocity = em->velocity};
-        new_susnotes[midi_note_count] =
-            (Susnote){.remaining = (float)(frame_secs * (double)em->duration),
-                      .chan_note = (U16)((channel << 8u) | note_number)};
-        ++midi_note_count;
-      }
-      break;
-    }
-    case Oevent_type_midi_cc: {
-      Oevent_midi_cc const *ec = &e->midi_cc;
-      // Note that we're not preserving the exact order of MIDI events as
-      // emitted by the orca VM. Notes and CCs that are emitted in the same
-      // step will always have the CCs sent first. Not sure if this is OK or
-      // not. If it's not OK, we can either loop again a second time to always
-      // send CCs after notes, or if that's not also OK, we can make the stack
-      // buffer more complicated and interleave the CCs in it.
-      send_midi_chan_msg(oosc_dev, midi_mode, 0xb, ec->channel, ec->control,
-                         ec->value);
-      break;
-    }
-    case Oevent_type_midi_cc_interpolated: {
-      Oevent_midi_cc_interpolated const *eci = &e->midi_cc_interpolated;
-      // Process the interpolation request to set up state for later processing
-      process_interpolated_midi_cc_event(eci, tick_num);
-      // The interpolation system will generate MIDI CC events during advance_midi_cc_interpolations()
-      break;
-    }
-    case Oevent_type_midi_pb: {
-      Oevent_midi_pb const *ep = &e->midi_pb;
-      // Same caveat regarding ordering with MIDI CC also applies here.
-      send_midi_chan_msg(oosc_dev, midi_mode, 0xe, ep->channel, ep->lsb,
-                         ep->msb);
-      break;
-    }
-    case Oevent_type_osc_ints: {
-      // kinda lame
-      if (!oosc_dev)
-        continue;
-      Oevent_osc_ints const *eo = &e->osc_ints;
-      char path[] = {'/', eo->glyph, '\0'};
-      I32 ints[ORCA_ARRAY_COUNTOF(eo->numbers)];
-      Usz nnum = eo->count;
-      for (Usz inum = 0; inum < nnum; ++inum) {
-        ints[inum] = eo->numbers[inum];
-      }
-      oosc_send_int32s(oosc_dev, path, ints, nnum);
-      break;
-    }
-    case Oevent_type_udp_string: {
-      // Nothing in the bOrca dialect emits UDP; the upstream dialect restores it.
-      break;
-    }
-    }
-  }
-
-do_note_ons:
-  if (midi_note_count > 0) {
-    Usz start_note_offs, end_note_offs;
-    susnote_list_add_notes(susnote_list, new_susnotes, midi_note_count,
-                           &start_note_offs, &end_note_offs);
-    if (start_note_offs != end_note_offs) {
-      Susnote const *restrict susnotes_off = susnote_list->buffer;
-      send_midi_note_offs(oosc_dev, midi_mode, susnotes_off + start_note_offs,
-                          susnotes_off + end_note_offs);
-    }
-    for (Usz i = 0; i < midi_note_count; ++i) {
-      Midi_note_on mno = midi_note_ons[i];
-      send_midi_chan_msg(oosc_dev, midi_mode, 0x9, mno.channel, mno.note_number,
-                         mno.velocity);
-    }
-  }
-  if (monofied_chans) {
-    // The behavior we end up with is that if regular note-ons are played in
-    // the same frame/step as a mono, the regular note-ons will have the actual
-    // MIDI note on sent, followed immediately by a MIDI note off. I don't know
-    // if this is good or not.
-    Usz start_note_offs, end_note_offs;
-    susnote_list_remove_by_chan_mask(susnote_list, monofied_chans,
-                                     &start_note_offs, &end_note_offs);
-    if (start_note_offs != end_note_offs) {
-      Susnote const *restrict susnotes_off = susnote_list->buffer;
-      send_midi_note_offs(oosc_dev, midi_mode, susnotes_off + start_note_offs,
-                          susnotes_off + end_note_offs);
-    }
-    midi_note_count = 0; // We're going to use this list again. Reset it.
-    for (Usz i = 0; i < 16; i++) { // Add these notes to list of note-ons
-      if (!(monofied_chans & 1u << i))
-        continue;
-      midi_note_ons[midi_note_count] =
-          (Midi_note_on){.channel = (U8)i,
-                         .note_number = midi_mono_ons[i].note_number,
-                         .velocity = midi_mono_ons[i].velocity};
-      new_susnotes[midi_note_count] = (Susnote){
-          .remaining = (float)(frame_secs * (double)midi_mono_ons[i].duration),
-          .chan_note = (U16)((i << 8u) | midi_mono_ons[i].note_number)};
-      midi_note_count++;
-    }
-    monofied_chans = false;
-    goto do_note_ons; // lol super wasteful for doing susnotes again
-  }
+  Tick_sink const sink = ged_sink(a);
+  tick_release_all(&sink, &a->susnote_list, &a->time_to_next_note_off);
 }
 
 staticni void ged_clear_osc_udp(Ged *a) {
@@ -1578,25 +1460,15 @@ static double ged_secs_to_deadline(Ged const *a) {
   return rem;
 }
 
-staticni void clear_and_run_vm(Glyph *restrict gbuf, Mark *restrict mbuf,
-                               Usz height, Usz width, Usz tick_number,
-                               Oevent_list *oevent_list, Usz random_seed,
-                               Opstate_store *opstate) {
-  mbuffer_clear(mbuf, height, width);
-  oevent_list_clear(oevent_list);
-  Orca_run_ctx const ctx = {.opstate = opstate};
-  orca_run(gbuf, mbuf, height, width, tick_number, oevent_list, random_seed,
-           &ctx);
-}
-
 staticni void ged_do_stuff(Ged *a) {
   if (!a->is_playing)
     return;
-  double secs_span = 60.0 / (double)a->bpm / 4.0;
+  // One tick in seconds, which is also a note's length unit, and the span to
+  // the next deadline: a sixth of a tick under beat clock.
+  double frame_secs = 60.0 / (double)a->bpm / 4.0;
+  double secs_span = frame_secs;
   if (a->midi_bclock) // see also ged_secs_to_deadline()
     secs_span /= 6.0;
-  Oosc_dev *oosc_dev = a->oosc_dev;
-  Midi_mode *midi_mode = &a->midi_mode;
   bool crossed_deadline = false;
 #if TIME_DEBUG
   Usz spins = 0;
@@ -1635,39 +1507,34 @@ staticni void ged_do_stuff(Ged *a) {
 #endif
   if (!crossed_deadline)
     return;
+  Tick_sink const sink = ged_sink(a);
   if (a->midi_bclock) {
-    send_midi_byte(oosc_dev, midi_mode, 0xF8); // MIDI beat clock
+    sink.midi1(sink.u, 0xF8); // MIDI beat clock
     Usz sixths = a->midi_bclock_sixths;
     a->midi_bclock_sixths = (U8)((sixths + 1) % 6);
     if (sixths != 0)
       return;
   }
-  apply_time_to_sustained_notes(oosc_dev, midi_mode, secs_span,
-                                &a->susnote_list, &a->time_to_next_note_off);
-  
-  // Process MIDI CC interpolations and generate intermediate CC events
-  advance_midi_cc_interpolations(secs_span, &a->scratch_oevent_list);
-  
-  // Send any generated interpolated CC events
-  if (a->scratch_oevent_list.count > 0) {
-    send_output_events(oosc_dev, midi_mode, a->bpm, &a->susnote_list,
-                       a->scratch_oevent_list.buffer, a->scratch_oevent_list.count, a->tick_num);
-    oevent_list_clear(&a->scratch_oevent_list); // Clear for next use
-  }
-  
-  clear_and_run_vm(a->field.buffer, a->mbuf_r.buffer, a->field.height,
-                   a->field.width, a->tick_num, &a->oevent_list,
-                   a->random_seed, &a->opstate);
-  ++a->tick_num;
+  // The tick body (tick.c) sends everything else for this tick: note-offs
+  // that are due, the glide engine's CCs, then the VM's events.
+  Tick_ctx const ctx = {.gbuffer = a->field.buffer,
+                        .mbuffer = a->mbuf_r.buffer,
+                        .height = a->field.height,
+                        .width = a->field.width,
+                        .random_seed = a->random_seed,
+                        .opstate = &a->opstate,
+                        .tick_num = &a->tick_num,
+                        .tick_list = &a->oevent_list,
+                        .engine_list = &a->engine_oevent_list,
+                        .susnotes = &a->susnote_list,
+                        .age_secs = secs_span,
+                        .frame_secs = frame_secs,
+                        .next_note_off = &a->time_to_next_note_off};
+  tick_body(&ctx, &sink);
   a->needs_remarking = true;
   a->is_draw_dirty = true;
-
-  Usz count = a->oevent_list.count;
-  if (count > 0) {
-    send_output_events(oosc_dev, midi_mode, a->bpm, &a->susnote_list,
-                       a->oevent_list.buffer, count, a->tick_num);
-    a->activity_counter += count;
-  }
+  // Engine events do not count as activity.
+  a->activity_counter += a->oevent_list.count;
 }
 
 static inline Isz isz_clamp(Isz x, Isz low, Isz high) {
@@ -1764,9 +1631,10 @@ staticni void ged_draw(Ged *a, WINDOW *win, char const *filename,
     // the store, as it does on scratch_field (AD-7). If the copy cannot
     // allocate, it runs on an empty store; the live one is untouched.
     (void)opstate_copy(&a->opstate, &a->scratch_opstate);
-    clear_and_run_vm(a->scratch_field.buffer, a->mbuf_r.buffer, a->field.height,
-                     a->field.width, a->tick_num, &a->scratch_oevent_list,
-                     a->random_seed, &a->scratch_opstate);
+    // Its events go to the preview list, which is never sent (AD-12).
+    tick_run_vm(a->scratch_field.buffer, a->mbuf_r.buffer, a->field.height,
+                a->field.width, a->tick_num, &a->scratch_oevent_list,
+                a->random_seed, &a->scratch_opstate);
     a->needs_remarking = false;
   }
   int win_w = a->win_w;
@@ -1806,7 +1674,7 @@ staticni void ged_adjust_bpm(Ged *a, Isz delta_bpm) {
   if (new_bpm < 1)
     new_bpm = 1;
   if ((Usz)new_bpm != a->bpm) {
-    a->bpm = (Usz)new_bpm;
+    ged_set_bpm(a, (Usz)new_bpm);
     a->is_draw_dirty = true;
     ged_send_osc_bpm(a, (I32)new_bpm);
   }
@@ -2172,7 +2040,7 @@ staticni void ged_set_playing(Ged *a, bool playing) {
     // dumb'n'dirty, get us close to the next step time, but not quite
     a->accum_secs = 60.0 / (double)a->bpm / 4.0;
     if (a->midi_bclock) {
-      send_midi_byte(a->oosc_dev, &a->midi_mode, 0xFA); // "start"
+      ged_send_midi_byte(a, 0xFA); // "start"
       a->accum_secs /= 6.0;
     }
     a->accum_secs -= 0.0001;
@@ -2182,7 +2050,7 @@ staticni void ged_set_playing(Ged *a, bool playing) {
     a->is_playing = false;
     send_control_message(a->oosc_dev, "/orca/stopped");
     if (a->midi_bclock)
-      send_midi_byte(a->oosc_dev, &a->midi_mode, 0xFC); // "stop"
+      ged_send_midi_byte(a, 0xFC); // "stop"
   }
   a->is_draw_dirty = true;
 }
@@ -2222,9 +2090,10 @@ staticni void ged_input_cmd(Ged *a, Ged_input_cmd ev) {
     break;
   case Ged_input_cmd_step_forward:
     undo_history_push(&a->undo_hist, &a->field, a->tick_num);
-    clear_and_run_vm(a->field.buffer, a->mbuf_r.buffer, a->field.height,
-                     a->field.width, a->tick_num, &a->oevent_list,
-                     a->random_seed, &a->opstate);
+    // The VM only, into the tick list: nothing is sent and no note ages.
+    tick_run_vm(a->field.buffer, a->mbuf_r.buffer, a->field.height,
+                a->field.width, a->tick_num, &a->oevent_list, a->random_seed,
+                &a->opstate);
     ++a->tick_num;
     a->activity_counter += a->oevent_list.count;
     a->needs_remarking = true;
@@ -3360,7 +3229,7 @@ staticni Tui_menus_result tui_drive_menus(Tui *t, int key) {
           t->ged.midi_bclock = new_enabled;
           if (t->ged.is_playing) {
             int msgbyte = new_enabled ? 0xFA /* start */ : 0xFC /* stop */;
-            send_midi_byte(t->ged.oosc_dev, &t->ged.midi_mode, msgbyte);
+            ged_send_midi_byte(&t->ged, msgbyte);
             // TODO timing judder will be experienced here, because the
             // deadline calculation conditions will have been changed by
             // toggling the midi_bclock flag. We would have to transfer the
@@ -3489,7 +3358,7 @@ staticni Tui_menus_result tui_drive_menus(Tui *t, int key) {
             break;
           int newbpm = atoi(osoc(tmpstr));
           if (newbpm > 0) {
-            t->ged.bpm = (Usz)newbpm;
+            ged_set_bpm(&t->ged, (Usz)newbpm);
             qnav_stack_pop();
           }
           osofree(tmpstr);

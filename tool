@@ -256,11 +256,12 @@ try_make_dir() {
 build_dir=build
 
 # The CORE list (architecture spine AD-1, AD-21): the core modules, which do
-# no I/O, read no clock and keep no writable globals. tick.c joins it when it
-# is extracted. Every build target links all of it, and tests/check-nm.sh and
-# tests/check-includes.sh check each file in it through './tool sources core',
-# so adding a core module edits only this line.
-core_sources='gbuffer.c vmio.c sim.c opstate.c'
+# no I/O, read no clock and keep no writable globals, plus tick.c, the
+# testable shell that obeys the same rules (AD-14). Every build target links
+# all of it, and tests/check-nm.sh and tests/check-includes.sh check each file
+# in it through './tool sources core', so adding a core module edits only
+# this line.
+core_sources='gbuffer.c vmio.c sim.c opstate.c tick.c'
 
 # set_target_sources <core|cli|orca|test>: sets source_files to CORE followed
 # by the target's own files. Returns 1 for an unknown name.
