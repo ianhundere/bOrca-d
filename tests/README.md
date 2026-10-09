@@ -77,14 +77,14 @@ asserted each line it edited; the script is not committed.
 
 ### Goldens that record current behaviour on purpose
 
-`r_single` and `r_shared` record lowercase `r` as it is today: it shuffles
-with glibc's unseeded `rand()`, so these two goldens hold the glibc stream,
-pass on Linux, fail on macOS or musl, and ignore `--seed`. They are
-replaced, not marked expected-fail, twice: B1 replaces them when it removes
+`r_single` and `r_shared` record lowercase `r` as it is today. Each `r`
+keeps its own bag in the op-state store and shuffles it with the PCG32 in
+`prng.h`, seeded from `--seed`, its row and its column, so the goldens hold
+the same stream on every platform, and `r_shared`'s `0r3` emits exactly
+`r_single`'s sequence. They are replaced, not marked expected-fail: B1
+replaced the glibc `rand()` stream they held before, when it removed
 `rand()` from `sim.c` (spine AD-1), and B6 replaces them again when it fixes
-`r`. B6's exact sequence depends on the PRNG it picks, so it cannot be
-written ahead of time; B6 proves the no-repeat and permutation properties in
-a unit test.
+`r`. B6 proves the no-repeat and permutation properties in a unit test.
 
 Seven characterization goldens pin, unmarked, what the operators that
 Phase 1 touches produce today, so a refactor that changes their output
@@ -103,14 +103,14 @@ redefines their operator: `bouncer_shapes` by I3, and `arp_patterns` and the
 | `chord_notes` | `=` with every digit and lowercase chord at velocity `.` and at `z`, an octave-9 chord that drops the notes above 127, input octave `a` clamped to 9, a channel above 15, and `:13Cf1` | `-t 1` | none |
 
 Their patches avoid what Phase 1 changes on purpose: no lowercase `r`
-operator (B1 changes it; `r` appears only as a `$` or `=` selector, which
-those operators lock), no uppercase `$` or `=` selector (B2 changes them),
-and no `=` velocity other than `.` or `z`, which give 127 before and after
-B5. Every `&` cell keeps y × width + x below 4096, because `&` indexes its
-state with no bounds check before B1; `;` returns early from 4096 on, so its
-cells stay below it too, or they would output nothing. Each case was
-captured with `--update`. When the cases were written, a throwaway model of
-the operators' source checked each cell; it is not committed.
+operator (B1 and B6 change it; `r` appears only as a `$` or `=` selector,
+which those operators lock), no uppercase `$` or `=` selector (B2 changes
+them), and no `=` velocity other than `.` or `z`, which give 127 before and
+after B5. Every `&` and `;` cell keeps y × width + x below 4096: before B1,
+`&` indexed its state with no bounds check and `;` returned early from cell
+4096 on. Each case was captured with `--update`. When the cases were
+written, a throwaway model of the operators' source checked each cell; it
+is not committed.
 
 The `R` and `;` pattern `c` goldens assume a 64-bit `Usz`: their hashes
 differ where `Usz` is 32-bit, as on armhf, whose CI job only compiles.
@@ -120,9 +120,12 @@ upstream "Allow wires to grow" cherry-pick (P0.1) and replaced by it; together
 with `j_reads_locked_J`, added with that pick, they now pin the grown-wire
 behaviour.
 
-The `&` state-overflow fixture is a sanitizer check, not a golden: its output
-differs between builds until B1 lands, so B1 adds it under the unit-test
-target.
+The `&` state-overflow fixture is a unit test, not a golden
+(`sim_bouncer_overflow_fixture` in `tests/unit/test_sim_state.c`): before
+B1 its output differed between builds, because the overflow read whatever
+lay past the array. It builds the 300×80 grid in memory, runs 256 ticks
+under the debug runner's ASan and UBSan, and checks that every `&` outputs
+what a lone in-range one does.
 
 ## Unit tests and core checks
 
@@ -150,10 +153,11 @@ without `UBSAN_OPTIONS`. CI and the commands above still set
 `UBSAN_OPTIONS=halt_on_error=1` explicitly; `UBSAN_OPTIONS` overrides the
 runner's defaults.
 
-`tool` defines the CORE list once (today `gbuffer.c vmio.c sim.c`; the
-extracted core modules and `tick.c` join it later). `cli`, `orca` and `test`
-link all of it, and `./tool sources <core|cli|orca|test>` prints a list, one
-file per line, so the checks below and the CI `armhf` job read the same lists.
+`tool` defines the CORE list once (today `gbuffer.c vmio.c sim.c
+opstate.c`; the other extracted core modules and `tick.c` join it later).
+`cli`, `orca` and `test` link all of it, and
+`./tool sources <core|cli|orca|test>` prints a list, one file per line, so
+the checks below and the CI `armhf` job read the same lists.
 
 Adapter `FEAT_` flags apply to `test` as they do to `orca`: `--portmidi`
 builds the PortMidi adapter tests, `--alsa` builds the ALSA adapter tests,
@@ -227,8 +231,8 @@ canary is detected and every result is PASS or XFAIL.
   every core file and pass the check. The canary `tests/includes/canary.c`
   includes `<stdio.h>` and calls `rand()`; it is scanned first, the same
   way as a CORE file, and both must be reported, or the check is blind and
-  the run fails. The `rand` half keeps that part of the check proven after
-  B1 removes `rand()` from `sim.c` and deletes its marker.
+  the run fails. The `rand` half keeps that part of the check proven now
+  that B1 has removed `rand()` from `sim.c` and deleted its marker.
 - `tests/check-nm.sh` (spine AD-1) compiles each CORE file on its own with
   `gcc -c -std=c99 -O2 -DNDEBUG -g0 -fno-pie -no-pie -fno-lto` and fails
   each writable symbol (class `B b C D d G g S s V v`) that `nm -P` lists
@@ -253,20 +257,19 @@ $ tests/check-includes.sh
 PASS  canary (detected: <stdio.h>, rand)
 PASS  gbuffer.c
 PASS  vmio.c
-XFAIL sim.c rand (B1)
-include check: 3 files, 2 pass, 1 xfail, 0 fail, 0 xpass; canary detected
+PASS  sim.c
+PASS  opstate.c
+include check: 4 files, 4 pass, 0 xfail, 0 fail, 0 xpass; canary detected
 $ tests/check-nm.sh
 PASS  canary (detected: D canary_extern_init, B canary_extern_zero, d canary_static_init, b canary_static_zero; marker path: canary_extern_zero unmarked, canary_absent matches none)
 PASS  gbuffer.c
 PASS  vmio.c
-XFAIL sim.c bouncer_states (B1: b bouncer_states)
-XFAIL sim.c arp_states (B1: b arp_states)
-XFAIL sim.c unique_random_state (B1: b unique_random_state)
 XFAIL sim.c midicc_interp_states (B3: b midicc_interp_states)
 XFAIL sim.c last_random_unique (B3: D last_random_unique)
 XFAIL sim.c chord_* (B3: d chord_aug, d chord_aug7, d chord_aug7_inv, … d chord_sus4_rich)
 XFAIL sim.c scale_* (B3: d scale_dorian, d scale_fifths, d scale_hirajoshi, d scale_iwato, d scale_lydian, d scale_major, d scale_minor, d scale_mixolydian, d scale_pentatonic, d scale_tetratonic)
-nm check: 3 files, 2 pass, 7 xfail, 0 fail, 0 xpass; canary detected
+PASS  opstate.c
+nm check: 4 files, 3 pass, 4 xfail, 0 fail, 0 xpass; canary detected
 ```
 
 In the summaries, `pass` counts clean files, and `xfail`, `fail` and `xpass`
@@ -279,8 +282,8 @@ count results, so one file can add several.
 
 | Marker file | Line format | Today |
 | --- | --- | --- |
-| `tests/xfail/include-check` | `<file> <pattern> <item...>`, where the pattern is `rand`, `<name.h>` or `"name.h"` | `sim.c rand B1` |
-| `tests/xfail/nm-check` | `<file> <symbol\|glob> <item>`, where the pattern is a symbol name, or a literal prefix of at least 3 characters followed by one trailing `*` (`chord_*`) | `bouncer_states`, `arp_states` and `unique_random_state` for B1; `midicc_interp_states`, `last_random_unique`, `chord_*` and `scale_*` for B3 |
+| `tests/xfail/include-check` | `<file> <pattern> <item...>`, where the pattern is `rand`, `<name.h>` or `"name.h"` | none (B1 deleted `sim.c rand B1`) |
+| `tests/xfail/nm-check` | `<file> <symbol\|glob> <item>`, where the pattern is a symbol name, or a literal prefix of at least 3 characters followed by one trailing `*` (`chord_*`) | `midicc_interp_states`, `last_random_unique`, `chord_*` and `scale_*` for B3 (B1 deleted its three lines) |
 
 - The items are the spec items the fix waits for, each matching
   `^(B[1-8]|I[1-6])$` (`B1`, `I3`); an nm marker names exactly one. A
@@ -290,8 +293,8 @@ count results, so one file can add several.
   commit.
 - Each nm marker line reports on its own: XFAIL with its item and every
   writable symbol it matched (class and name), or XPASS once it matches
-  none, so B1 and B3 each remove the lines of the symbols they delete. A
-  writable symbol that no line of its file matches fails as
+  none, so each item removes the lines of the symbols it deletes, as B1
+  did. A writable symbol that no line of its file matches fails as
   `FAIL <file> <class> <name> (unmarked symbol)`.
 - The `chord_*` and `scale_*` globs cover the 72 tables that stay writable
   because `scales` and `scales_and_chords` hold their addresses; B3 makes

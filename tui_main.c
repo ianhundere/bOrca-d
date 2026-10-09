@@ -1,6 +1,7 @@
 #include "base.h"
 #include "field.h"
 #include "gbuffer.h"
+#include "opstate.h"
 #include "osc_out.h"
 #include "oso.h"
 #include "sim.h"
@@ -57,7 +58,9 @@ fprintf(stderr,
 "                           starting dimensions.\n"
 "    --bpm <number>         Set the tempo (beats per minute).\n"
 "                           Default: 120\n"
-"    --seed <number>        Set the seed for the random function.\n"
+"    --seed <number>        Set the seed for R, for lowercase r (each\n"
+"                           cell seeds its own shuffle from it) and for\n"
+"                           the random pattern (c) of ;.\n"
 "                           Default: 1\n"
 "    -h or --help           Print this message and exit.\n"
 "\n"
@@ -765,9 +768,16 @@ staticni void draw_oevent_list(WINDOW *win, Oevent_list const *oevent_list) {
 
 staticni void ged_resize_grid(Field *field, Mbuf_reusable *mbr, Usz new_height,
                               Usz new_width, Usz tick_num, Field *scratch_field,
-                              Undo_history *undo_hist, Ged_cursor *ged_cursor) {
+                              Undo_history *undo_hist, Ged_cursor *ged_cursor,
+                              Opstate_store *opstate) {
   assert(new_height > 0 && new_width > 0);
   undo_history_push(undo_hist, field, tick_num);
+  // Drop the operator state of the cells the new size cuts off; every cell
+  // inside keeps its state (AD-6). If the rebuild cannot allocate, clear the
+  // store instead (clear never allocates): kept entries outside the grid
+  // would come back with stale state on a later enlarge or undo.
+  if (!opstate_prune(opstate, new_height, new_width))
+    opstate_clear(opstate);
   field_copy(field, scratch_field);
   field_resize_raw(field, new_height, new_width);
   // junky copies until i write a smarter thing
@@ -804,7 +814,8 @@ staticni bool ged_resize_grid_snap_ruler(Field *field, Mbuf_reusable *mbr,
                                          Isz delta_w, Usz tick_num,
                                          Field *scratch_field,
                                          Undo_history *undo_hist,
-                                         Ged_cursor *ged_cursor) {
+                                         Ged_cursor *ged_cursor,
+                                         Opstate_store *opstate) {
   assert(ruler_y > 0);
   assert(ruler_x > 0);
   Usz field_h = field->height;
@@ -826,7 +837,7 @@ staticni bool ged_resize_grid_snap_ruler(Field *field, Mbuf_reusable *mbr,
   if (new_field_h == field_h && new_field_w == field_w)
     return false;
   ged_resize_grid(field, mbr, new_field_h, new_field_w, tick_num, scratch_field,
-                  undo_hist, ged_cursor);
+                  undo_hist, ged_cursor, opstate);
   return true;
 }
 
@@ -1140,6 +1151,11 @@ staticni void midi_mode_deinit(Midi_mode *mm) {
 typedef struct {
   Field field;
   Field scratch_field;
+  // The per-cell state of &, ; and r (AD-5, AD-6). Ticks and step-forward
+  // run on opstate; the paused re-mark runs on scratch_opstate, overwritten
+  // with a copy of opstate before each pass (AD-7).
+  Opstate_store opstate;
+  Opstate_store scratch_opstate;
   Field clipboard_field;
   Mbuf_reusable mbuf_r;
   Undo_history undo_hist;
@@ -1177,6 +1193,8 @@ typedef struct {
 static void ged_init(Ged *a, Usz undo_limit, Usz init_bpm, Usz init_seed) {
   field_init(&a->field);
   field_init(&a->scratch_field);
+  opstate_init(&a->opstate);
+  opstate_init(&a->scratch_opstate);
   field_init(&a->clipboard_field);
   mbuf_reusable_init(&a->mbuf_r);
   undo_history_init(&a->undo_hist, undo_limit);
@@ -1214,6 +1232,8 @@ static void ged_init(Ged *a, Usz undo_limit, Usz init_bpm, Usz init_seed) {
 static void ged_deinit(Ged *a) {
   field_deinit(&a->field);
   field_deinit(&a->scratch_field);
+  opstate_free(&a->opstate);
+  opstate_free(&a->scratch_opstate);
   field_deinit(&a->clipboard_field);
   mbuf_reusable_deinit(&a->mbuf_r);
   undo_history_deinit(&a->undo_hist);
@@ -1560,10 +1580,13 @@ static double ged_secs_to_deadline(Ged const *a) {
 
 staticni void clear_and_run_vm(Glyph *restrict gbuf, Mark *restrict mbuf,
                                Usz height, Usz width, Usz tick_number,
-                               Oevent_list *oevent_list, Usz random_seed) {
+                               Oevent_list *oevent_list, Usz random_seed,
+                               Opstate_store *opstate) {
   mbuffer_clear(mbuf, height, width);
   oevent_list_clear(oevent_list);
-  orca_run(gbuf, mbuf, height, width, tick_number, oevent_list, random_seed);
+  Orca_run_ctx const ctx = {.opstate = opstate};
+  orca_run(gbuf, mbuf, height, width, tick_number, oevent_list, random_seed,
+           &ctx);
 }
 
 staticni void ged_do_stuff(Ged *a) {
@@ -1634,7 +1657,7 @@ staticni void ged_do_stuff(Ged *a) {
   
   clear_and_run_vm(a->field.buffer, a->mbuf_r.buffer, a->field.height,
                    a->field.width, a->tick_num, &a->oevent_list,
-                   a->random_seed);
+                   a->random_seed, &a->opstate);
   ++a->tick_num;
   a->needs_remarking = true;
   a->is_draw_dirty = true;
@@ -1737,9 +1760,13 @@ staticni void ged_draw(Ged *a, WINDOW *win, char const *filename,
                                   a->field.width);
     field_copy(&a->field, &a->scratch_field);
     mbuf_reusable_ensure_size(&a->mbuf_r, a->field.height, a->field.width);
+    // The pass advances operator state, so it runs on a throwaway copy of
+    // the store, as it does on scratch_field (AD-7). If the copy cannot
+    // allocate, it runs on an empty store; the live one is untouched.
+    (void)opstate_copy(&a->opstate, &a->scratch_opstate);
     clear_and_run_vm(a->scratch_field.buffer, a->mbuf_r.buffer, a->field.height,
                      a->field.width, a->tick_num, &a->scratch_oevent_list,
-                     a->random_seed);
+                     a->random_seed, &a->scratch_opstate);
     a->needs_remarking = false;
   }
   int win_w = a->win_w;
@@ -2052,7 +2079,8 @@ staticni void ged_adjust_rulers_relative(Ged *a, Isz delta_y, Isz delta_x) {
 staticni void ged_resize_grid_relative(Ged *a, Isz delta_y, Isz delta_x) {
   ged_resize_grid_snap_ruler(&a->field, &a->mbuf_r, a->ruler_spacing_y,
                              a->ruler_spacing_x, delta_y, delta_x, a->tick_num,
-                             &a->scratch_field, &a->undo_hist, &a->ged_cursor);
+                             &a->scratch_field, &a->undo_hist, &a->ged_cursor,
+                             &a->opstate);
   a->needs_remarking = true; // could check if we actually resized
   a->is_draw_dirty = true;
   ged_update_internal_geometry(a);
@@ -2196,7 +2224,7 @@ staticni void ged_input_cmd(Ged *a, Ged_input_cmd ev) {
     undo_history_push(&a->undo_hist, &a->field, a->tick_num);
     clear_and_run_vm(a->field.buffer, a->mbuf_r.buffer, a->field.height,
                      a->field.width, a->tick_num, &a->oevent_list,
-                     a->random_seed);
+                     a->random_seed, &a->opstate);
     ++a->tick_num;
     a->activity_counter += a->oevent_list.count;
     a->needs_remarking = true;
@@ -3270,7 +3298,8 @@ staticni Tui_menus_result tui_drive_menus(Tui *t, int key) {
         if (did_get_ok_size) {
           ged_resize_grid(&t->ged.field, &t->ged.mbuf_r, new_field_h,
                           new_field_w, t->ged.tick_num, &t->ged.scratch_field,
-                          &t->ged.undo_hist, &t->ged.ged_cursor);
+                          &t->ged.undo_hist, &t->ged.ged_cursor,
+                          &t->ged.opstate);
           ged_update_internal_geometry(&t->ged);
           t->ged.needs_remarking = true;
           t->ged.is_draw_dirty = true;
@@ -3294,6 +3323,7 @@ staticni Tui_menus_result tui_drive_menus(Tui *t, int key) {
             field_resize_raw(&t->ged.field, new_field_h, new_field_w);
             memset(t->ged.field.buffer, '.',
                    new_field_h * new_field_w * sizeof(Glyph));
+            opstate_clear(&t->ged.opstate);
             ged_cursor_confine(&t->ged.ged_cursor, new_field_h, new_field_w);
             mbuf_reusable_ensure_size(&t->ged.mbuf_r, new_field_h, new_field_w);
             ged_update_internal_geometry(&t->ged);
@@ -3420,6 +3450,7 @@ staticni Tui_menus_result tui_drive_menus(Tui *t, int key) {
           Field_load_error fle =
               field_load_file(osoc(temp_name), &t->ged.field);
           if (fle == Field_load_error_ok) {
+            opstate_clear(&t->ged.opstate);
             qnav_stack_pop();
             osoputoso(&t->file_name, temp_name);
             mbuf_reusable_ensure_size(&t->ged.mbuf_r, t->ged.field.height,
@@ -3505,7 +3536,7 @@ staticni Tui_menus_result tui_drive_menus(Tui *t, int key) {
               ged_resize_grid(&t->ged.field, &t->ged.mbuf_r, (Usz)newheight,
                               (Usz)newwidth, t->ged.tick_num,
                               &t->ged.scratch_field, &t->ged.undo_hist,
-                              &t->ged.ged_cursor);
+                              &t->ged.ged_cursor, &t->ged.opstate);
               ged_update_internal_geometry(&t->ged);
               t->ged.needs_remarking = true;
               t->ged.is_draw_dirty = true;
@@ -4042,7 +4073,7 @@ event_loop:;
     t.ged.tick_num = 0;
     t.ged.needs_remarking = true;
     t.ged.is_draw_dirty = true;
-    reset_last_unique_value(); // Call this to reset the global unique value
+    opstate_clear(&t.ged.opstate); // every &, ; and r starts over
     break;
   case '[':
     ged_adjust_rulers_relative(&t.ged, 0, -1);

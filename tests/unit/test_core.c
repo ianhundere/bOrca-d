@@ -1,5 +1,6 @@
 // Unit tests for the CORE modules. They link CORE against libc only.
 #include "../../gbuffer.h"
+#include "../../opstate.h"
 #include "../../sim.h"
 #include "../../vmio.h"
 #include "tests.h"
@@ -106,7 +107,7 @@ void test_oevent_list_growth(void) {
 }
 
 // One tick of a stable operator: A adds its two inputs and writes the sum
-// below itself, and emits no event.
+// below itself, emits no event and keeps no operator state.
 void test_orca_run_smoke(void) {
   enum { H = 3, W = 3 };
   Glyph grid[H * W];
@@ -118,9 +119,14 @@ void test_orca_run_smoke(void) {
   memset(marks, 0, sizeof marks);
   Oevent_list events;
   oevent_list_init(&events);
-  orca_run(grid, marks, H, W, 0, &events, 0);
+  Opstate_store store;
+  opstate_init(&store);
+  Orca_run_ctx const ctx = {.opstate = &store};
+  orca_run(grid, marks, H, W, 0, &events, 0, &ctx);
   CHECK(grid[1 * W + 1] == '3');
   CHECK(memcmp(grid, "1A2", 3) == 0);
   CHECK(events.count == 0);
+  CHECK(store.count == 0);
   oevent_list_deinit(&events);
+  opstate_free(&store);
 }

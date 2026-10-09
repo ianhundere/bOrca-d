@@ -1,6 +1,5 @@
 #include "sim.h"
 #include "gbuffer.h"
-#include <stdlib.h>
 #include <string.h>
 
 // stored unique random value
@@ -90,6 +89,7 @@ typedef struct {
   Glyph *vars_slots;
   Oevent_list *oevent_list;
   Usz random_seed;
+  Orca_run_ctx const *ctx;
 } Oper_extra_params;
 
 static void oper_poke_and_stun(Glyph *restrict gbuffer, Mark *restrict mbuffer,
@@ -1168,16 +1168,6 @@ typedef enum {
   ARP_PATTERN_COUNT
 } ArpPatternType;
 
-// Arpeggiator state for tracking position
-typedef struct {
-  Usz step_counter;
-  Usz last_pattern;
-  Usz last_range;
-} Arp_state;
-
-#define MAX_ARP_GRID_SIZE 4096
-static Arp_state arp_states[MAX_ARP_GRID_SIZE] = {0};
-
 // Function to get the degree based on pattern type and step
 static Usz get_arp_degree(ArpPatternType pattern, Usz step, Usz range, 
                          Oper_extra_params *extra_params) {
@@ -1305,13 +1295,6 @@ BEGIN_OPERATOR(arpeggiator)
   PORT(0, 2, IN | PARAM, "Pattern");  // Pattern (0-9, a-d)
   PORT(1, 0, OUT, "");         // Degree output
 
-  // Calculate state index
-  Usz state_idx = y * width + x;
-  if (state_idx >= MAX_ARP_GRID_SIZE)
-    return;
-
-  Arp_state *state = &arp_states[state_idx];
-
   // Get inputs
   Glyph range_g = PEEK(0, 1);
   Glyph pattern_g = PEEK(0, 2);
@@ -1319,14 +1302,23 @@ BEGIN_OPERATOR(arpeggiator)
   if (range_g == '.' || pattern_g == '.')
     return;
 
+  // This cell's state, from the caller's op-state store (AD-5)
+  Opstate_entry *entry = opstate_lookup(extra_params->ctx->opstate, y, x,
+                                        This_oper_char);
+  if (!entry)
+    return;
+  Opstate_arp *state = &entry->u.arp;
+
   Usz range = index_of(range_g);
   Usz pattern = index_of(pattern_g) % ARP_PATTERN_COUNT;
   if (range == 0) range = 1;
   if (range > 4) range = 4;
 
-  // Reset counter if pattern or range changed
-  if (state->last_pattern != pattern || state->last_range != range) {
+  // Reset counter on the first visit or if pattern or range changed
+  if (!state->initialized || state->last_pattern != pattern ||
+      state->last_range != range) {
     state->step_counter = 0;
+    state->initialized = true;
     state->last_pattern = pattern;
     state->last_range = range;
   }
@@ -1341,51 +1333,38 @@ BEGIN_OPERATOR(arpeggiator)
   state->step_counter++;
 END_OPERATOR
 
-// BOORCH's new Random Unique
-#define MAX_SEQUENCE_SIZE 36 // For values 0-9 and A-Z
+// BOORCH's new Random Unique. Each lowercase r keeps its own bag in its
+// op-state entry (Opstate_random) and shuffles it with its own PRNG, seeded
+// from random_seed and the cell on its first visit (AD-8).
 
-typedef struct {
-  Usz sequence[MAX_SEQUENCE_SIZE];
-  Usz current_index;
-  Usz sequence_size;
-  bool initialized;
-  Usz last_min; // Add these to detect range changes
-  Usz last_max; // and force reinitialization
-} Unique_random_state;
-
-static Unique_random_state unique_random_state = {0};
-
-static void shuffle_sequence(Usz *array, Usz n) {
+// Fisher-Yates shuffle of the bag.
+static void shuffle_sequence(U8 *array, Usz n, Prng *prng) {
   if (n <= 1)
     return;
 
   for (Usz i = n - 1; i > 0; i--) {
-    // Use existing random generator from ORCA
-    Usz j = (Usz)(((U32)rand()) % (i + 1));
+    Usz j = prng_bounded(prng, (U32)(i + 1));
     // Swap
-    Usz temp = array[i];
+    U8 temp = array[i];
     array[i] = array[j];
     array[j] = temp;
   }
 }
 
-static void initialize_sequence(Usz min, Usz max) {
-  unique_random_state.sequence_size = (max >= min) ? (max - min + 1) : 0;
-  if (unique_random_state.sequence_size > MAX_SEQUENCE_SIZE) {
-    unique_random_state.sequence_size = MAX_SEQUENCE_SIZE;
-  }
+static void initialize_sequence(Opstate_random *state, Usz min, Usz max) {
+  Usz size = (max >= min) ? (max - min + 1) : 0;
+  if (size > Opstate_random_max_size)
+    size = Opstate_random_max_size;
+  state->sequence_size = (U8)size;
 
   // Fill sequence with values from min to max
-  for (Usz i = 0; i < unique_random_state.sequence_size; i++) {
-    unique_random_state.sequence[i] = min + i;
+  for (Usz i = 0; i < size; i++) {
+    state->sequence[i] = (U8)(min + i);
   }
 
-  shuffle_sequence(unique_random_state.sequence,
-                   unique_random_state.sequence_size);
-  unique_random_state.current_index = 0;
+  shuffle_sequence(state->sequence, size, &state->prng);
+  state->current_index = 0;
 }
-
-void reset_last_unique_value(void) { unique_random_state.initialized = false; }
 
 // Modified random operator for lowercase 'r' - requires bang, uses shuffle to avoid consecutive duplicates
 BEGIN_OPERATOR(random)
@@ -1404,6 +1383,17 @@ BEGIN_OPERATOR(random)
       return;
     }
 
+    // This cell's state, from the caller's op-state store (AD-5)
+    Opstate_entry *entry = opstate_lookup(extra_params->ctx->opstate, y, x,
+                                          This_oper_char);
+    if (!entry)
+      return;
+    Opstate_random *state = &entry->u.random;
+
+    // First visit: seed this cell's generator (AD-8)
+    if (!state->initialized)
+      prng_seed(&state->prng, extra_params->random_seed, y, x);
+
     Usz min = index_of(min_glyph);
     Usz max = index_of(max_glyph);
 
@@ -1414,25 +1404,22 @@ BEGIN_OPERATOR(random)
     }
 
     // Initialize or reinitialize if needed
-    if (!unique_random_state.initialized ||
-        unique_random_state.current_index >= unique_random_state.sequence_size ||
-        min != unique_random_state.last_min ||
-        max != unique_random_state.last_max) {
-      initialize_sequence(min, max);
-      unique_random_state.initialized = true;
-      unique_random_state.last_min = min;
-      unique_random_state.last_max = max;
+    if (!state->initialized || state->current_index >= state->sequence_size ||
+        min != (Usz)state->last_min || max != (Usz)state->last_max) {
+      initialize_sequence(state, min, max);
+      state->initialized = true;
+      state->last_min = (U8)min;
+      state->last_max = (U8)max;
     }
 
     // Get next value from sequence
-    Usz result = unique_random_state.sequence[unique_random_state.current_index];
-    unique_random_state.current_index++;
+    Usz result = state->sequence[state->current_index];
+    state->current_index++;
 
     // Reshuffle if we've used all values
-    if (unique_random_state.current_index >= unique_random_state.sequence_size) {
-      shuffle_sequence(unique_random_state.sequence,
-                       unique_random_state.sequence_size);
-      unique_random_state.current_index = 0;
+    if (state->current_index >= state->sequence_size) {
+      shuffle_sequence(state->sequence, state->sequence_size, &state->prng);
+      state->current_index = 0;
     }
 
     POKE(1, 0, glyph_of(result));
@@ -1502,15 +1489,6 @@ static const char *waveforms[] = {
 
 #define WAVE_LENGTH 128
 
-typedef struct {
-  Usz current_index; // Current position in waveform
-  bool initialized;
-  Usz last_rate;  // Track rate changes
-  Usz last_shape; // Track shape changes
-} Bouncer_state;
-
-static Bouncer_state bouncer_states[4096] = {0};
-
 BEGIN_OPERATOR(bouncer)
   PORT(0, 1, IN | PARAM, "Start"); // Start value (a)
   PORT(0, 2, IN | PARAM, "End"); // End value (b)
@@ -1526,8 +1504,12 @@ BEGIN_OPERATOR(bouncer)
   if (start_g == '.' || end_g == '.')
     return;
 
-  Usz state_idx = y * width + x;
-  Bouncer_state *state = &bouncer_states[state_idx];
+  // This cell's state, from the caller's op-state store (AD-5)
+  Opstate_entry *entry = opstate_lookup(extra_params->ctx->opstate, y, x,
+                                        This_oper_char);
+  if (!entry)
+    return;
+  Opstate_bouncer *state = &entry->u.bouncer;
 
   Usz start = index_of(start_g);
   Usz end = index_of(end_g);
@@ -1573,13 +1555,16 @@ END_OPERATOR
 //////// Run simulation
 
 void orca_run(Glyph *restrict gbuf, Mark *restrict mbuf, Usz height, Usz width,
-              Usz tick_number, Oevent_list *oevent_list, Usz random_seed) {
+              Usz tick_number, Oevent_list *oevent_list, Usz random_seed,
+              Orca_run_ctx const *ctx) {
+  assert(ctx && ctx->opstate);
   Glyph vars_slots[Glyphs_index_count];
   memset(vars_slots, '.', sizeof(vars_slots));
   Oper_extra_params extras;
   extras.vars_slots = &vars_slots[0];
   extras.oevent_list = oevent_list;
   extras.random_seed = random_seed;
+  extras.ctx = ctx;
 
   for (Usz iy = 0; iy < height; ++iy) {
     Glyph const *glyph_row = gbuf + iy * width;

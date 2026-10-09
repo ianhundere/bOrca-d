@@ -2,6 +2,3 @@
 # One line per (file, pattern): <file> <pattern> <item...>, naming the spec
 # items the fix waits for. The series that removes a violation deletes its
 # line in the same commit; see tests/README.md.
-
-# Lowercase r shuffles with libc rand(), which B1 bans.
-sim.c rand B1

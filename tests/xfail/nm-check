@@ -5,11 +5,6 @@
 # that removes a symbol deletes its line in the same commit. A writable
 # symbol that no line matches fails the run. See tests/README.md.
 
-# B1 moves the operator state of &, ; and r into a per-cell store.
-sim.c bouncer_states B1
-sim.c arp_states B1
-sim.c unique_random_state B1
-
 # B3 moves the glide state into a caller-owned struct and deletes
 # last_random_unique.
 sim.c midicc_interp_states B3

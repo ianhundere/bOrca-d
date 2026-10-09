@@ -293,6 +293,43 @@ make clean       # removes build/
 
 Changes since boorch/bOrca `4f349cd` that alter how an existing patch plays, change what goes out over MIDI, or break the public `orca_run` API, newest first. Each entry has a one-line title, says what changed and why, shows a before/after example, and points at an updated or new patch under `examples/`. The id in brackets at the end of an entry (`P0.1`, `B2`, …) is the item in the fork's implementation spec, the same vocabulary the `.xfail` markers under `tests/` use.
 
+### `orca_run` takes a context with a caller-owned operator-state store, and `&`, `;` and `r` keep their state per cell
+
+API break: `orca_run` keeps its seven arguments and takes an eighth, `Orca_run_ctx const *ctx` (`sim.h`). Its one field, `opstate`, is required and points at an `Opstate_store` (`opstate.h`) that the caller sets up with `opstate_init`, keeps across ticks and releases with `opstate_free`. Every existing caller must change. The store holds the per-cell state of `&`, `;` and lowercase `r`, which used to live in fixed-size arrays and one global shuffle inside `sim.c`; the arrays overflowed or gave up on large grids, and the state never reset on open.
+
+For embedders: `reset_last_unique_value()` is removed; `opstate_clear()` replaces it. A build that lists the core sources itself must add `opstate.c`. Clear the store when a patch is loaded, call `opstate_prune` on a resize, and run any preview pass on an `opstate_copy` of the store, never on the store itself.
+
+What changes in patches:
+
+- `&` and `;` work on any grid size. Before, an `&` at cell index y × width + x of 4096 or more read and wrote past its state array, and a `;` there output nothing.
+- Lowercase `r` now draws a different sequence. Each `r` keeps its own bag, shuffled by a PCG32 seeded from the run's seed (`--seed`) and its cell, so it is the same on every platform, follows `--seed`, and no longer shares one shuffle with every other `r` in the patch, which broke each one's no-repeat cycle. It can still repeat a value across a reshuffle until B6, which changes `r` again. The TUI's default seed is 1 and `cli`'s is 0, so run the TUI with `--seed 0` to hear the sequences in the test goldens.
+- The state resets on file open, new file and Ctrl+R, and a resize keeps it for every cell still inside the grid. Before, only Ctrl+R reset anything, and only `r`'s shuffle. Undo never touches the state: undoing an open, a new file or a resize brings back the grid, but not the state its `&`, `;` and `r` had.
+- Editing while paused no longer advances `&`, or a banged `;` or `r`: the redraw pass runs on a throwaway copy of the state.
+- Switching a cell directly between two stateful operators starts the new one fresh: `&` → `;` → `&` restarts the bouncer's phase, which the old separate arrays kept. Deleting an operator and typing it again, or passing through a stateless glyph (`&` → `A` → `&`), resumes its old state, as before.
+
+Before → after, a caller:
+
+```c
+// before
+orca_run(gbuf, mbuf, height, width, tick, &events, seed);
+
+// after
+Opstate_store store;
+opstate_init(&store); // once, before the first tick
+Orca_run_ctx const ctx = {.opstate = &store};
+orca_run(gbuf, mbuf, height, width, tick, &events, seed, &ctx);
+opstate_free(&store); // once, after the last tick
+```
+
+Before → after, the first 12 outputs of `tests/patches/r_single.orca` (one `0r3` banged every tick, `--seed 0`):
+
+```
+before: 0 2 1 3  0 2 1 3  3 2 0 1   (glibc rand(), one shuffle for every r)
+after:  3 1 2 0  3 0 2 1  2 3 1 0   (this cell's own PCG32 stream)
+```
+
+No example patch: every patch under `examples/` plays as before; the repro patches are `tests/patches/r_single.orca` and `tests/patches/r_shared.orca`. (B1)
+
 ### Quitting while playing sends MIDI stop when beat clock is on, and `/orca/stopped` when OSC output is set
 
 Quitting now stops playback first, as pausing does, so a device that follows bOrca's beat clock stops with it and an OSC listener hears that playback ended. Before, quitting only released the sustained notes. This applies to every build; in `--alsa` builds SIGTERM, SIGHUP and SIGINT quit the same way. Quitting while paused sends nothing new, because pausing already sent these messages.

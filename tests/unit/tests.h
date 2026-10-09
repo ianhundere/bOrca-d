@@ -9,7 +9,20 @@
 #define CORE_TESTS(X)                                                          \
   X(gbuffer_bounds)                                                            \
   X(oevent_list_growth)                                                        \
-  X(orca_run_smoke)
+  X(orca_run_smoke)                                                            \
+  X(prng_pcg32_reference)                                                      \
+  X(opstate_edge_keys)                                                         \
+  X(opstate_growth)                                                            \
+  X(opstate_retag)                                                             \
+  X(opstate_clear_keeps_capacity)                                              \
+  X(opstate_prune)                                                             \
+  X(opstate_copy)                                                              \
+  X(opstate_reset_anchors)                                                     \
+  X(sim_bouncer_overflow_fixture)                                              \
+  X(sim_far_cell)                                                              \
+  X(sim_two_r_permutations)                                                    \
+  X(sim_preview_isolation)                                                     \
+  X(sim_clear_and_prune)
 
 // The full list for each adapter FEAT_ flag, and for the runner's failure
 // canary, whatever the flags.

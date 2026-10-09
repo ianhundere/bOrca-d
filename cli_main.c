@@ -2,6 +2,7 @@
 #include "events_print.h"
 #include "field.h"
 #include "gbuffer.h"
+#include "opstate.h"
 #include "sim.h"
 #include "vmio.h"
 #include <ctype.h>
@@ -136,11 +137,15 @@ int main(int argc, char **argv) {
   mbuf_reusable_ensure_size(&mbuf_r, field.height, field.width);
   Oevent_list oevent_list;
   oevent_list_init(&oevent_list);
+  // The per-cell state of &, ; and r, owned here for the whole run.
+  Opstate_store opstate;
+  opstate_init(&opstate);
+  Orca_run_ctx const ctx = {.opstate = &opstate};
   for (Usz i = 0; i < max_ticks; ++i) {
     mbuffer_clear(mbuf_r.buffer, field.height, field.width);
     oevent_list_clear(&oevent_list);
     orca_run(field.buffer, mbuf_r.buffer, field.height, field.width, i,
-             &oevent_list, seed);
+             &oevent_list, seed, &ctx);
     if (print_events) {
       events_print(stdout, i, oevent_list.buffer, oevent_list.count);
       if (print_output) {
@@ -151,6 +156,7 @@ int main(int argc, char **argv) {
   }
   mbuf_reusable_deinit(&mbuf_r);
   oevent_list_deinit(&oevent_list);
+  opstate_free(&opstate);
   // With --events every tick already printed its grid; print the final grid
   // only in the plain mode, as before.
   if (print_output && !print_events)
