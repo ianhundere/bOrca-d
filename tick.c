@@ -17,7 +17,7 @@ void susnote_list_deinit(Susnote_list *sl) { free(sl->buffer); }
 
 void susnote_list_clear(Susnote_list *sl) { sl->count = 0; }
 
-void susnote_list_add_notes(Susnote_list *sl, Susnote const *restrict notes,
+bool susnote_list_add_notes(Susnote_list *sl, Susnote const *restrict notes,
                             Usz added_count, Usz *restrict start_removed,
                             Usz *restrict end_removed) {
   Susnote *buffer = sl->buffer;
@@ -28,6 +28,8 @@ void susnote_list_add_notes(Susnote_list *sl, Susnote const *restrict notes,
   if (cap < needed_cap) {
     cap = needed_cap < 16 ? 16 : orca_round_up_power2(needed_cap);
     buffer = realloc(buffer, cap * sizeof(Susnote));
+    if (!buffer)
+      return false; // the old buffer, and so the list, is unchanged
     sl->capacity = cap;
     sl->buffer = buffer;
   }
@@ -50,24 +52,21 @@ void susnote_list_add_notes(Susnote_list *sl, Susnote const *restrict notes,
   }
   sl->count = count;
   *end_removed = rem;
+  return true;
 }
 
-void susnote_list_advance_time(Susnote_list *sl, double delta_time,
-                               Usz *restrict start_removed,
-                               Usz *restrict end_removed,
-                               double *soonest_deadline) {
+void susnote_list_advance_tick(Susnote_list *sl, Usz *restrict start_removed,
+                               Usz *restrict end_removed) {
   Susnote *restrict buffer = sl->buffer;
   Usz count = sl->count;
   *end_removed = count;
-  float delta_float = (float)delta_time;
-  float soonest = 1.0f;
+  // A released note swaps with the last unvisited one, so the note-offs of
+  // notes released together go out in that swap order: for three notes
+  // that are 1st, 2nd and 3rd in the list, the 2nd, the 3rd, then the 1st.
   for (Usz i = 0; i < count;) {
     Susnote sn = buffer[i];
-    sn.remaining -= delta_float;
-    if (sn.remaining > 0.001) {
-      if (sn.remaining < soonest)
-        soonest = sn.remaining;
-      buffer[i].remaining = sn.remaining;
+    if (sn.remaining > 1) {
+      --buffer[i].remaining;
       ++i;
     } else {
       --count;
@@ -76,7 +75,6 @@ void susnote_list_advance_time(Susnote_list *sl, double delta_time,
     }
   }
   *start_removed = count;
-  *soonest_deadline = (double)soonest;
   sl->count = count;
 }
 
@@ -101,17 +99,6 @@ void susnote_list_remove_by_chan_mask(Susnote_list *sl, Usz chan_mask,
   sl->count = count;
 }
 
-double susnote_list_soonest_deadline(Susnote_list const *sl) {
-  float soonest = 1.0f;
-  Susnote const *buffer = sl->buffer;
-  for (Usz i = 0, n = sl->count; i < n; ++i) {
-    float rem = buffer[i].remaining;
-    if (rem < soonest)
-      soonest = rem;
-  }
-  return (double)soonest;
-}
-
 static void send_chan_msg(Tick_sink const *sink, int type /*0..15*/,
                           int chan /*0.. 15*/, int byte1 /*0..127*/,
                           int byte2 /*0..127*/) {
@@ -126,12 +113,14 @@ static void send_note_offs(Tick_sink const *sink, Susnote const *start,
   }
 }
 
-static void age_sustained_notes(Tick_sink const *sink, double time_elapsed,
-                                Susnote_list *susnotes,
-                                double *next_note_off_deadline) {
+// Step 2 of the wire order in tick.h. With nothing sustained it sends
+// nothing and touches no buffer, which may be NULL.
+static void age_sustained_notes(Tick_sink const *sink,
+                                Susnote_list *susnotes) {
+  if (susnotes->count == 0)
+    return;
   Usz start_removed, end_removed;
-  susnote_list_advance_time(susnotes, time_elapsed, &start_removed,
-                            &end_removed, next_note_off_deadline);
+  susnote_list_advance_tick(susnotes, &start_removed, &end_removed);
   if (ORCA_UNLIKELY(start_removed != end_removed)) {
     Susnote const *restrict susnotes_off = susnotes->buffer;
     send_note_offs(sink, susnotes_off + start_removed,
@@ -139,18 +128,17 @@ static void age_sustained_notes(Tick_sink const *sink, double time_elapsed,
   }
 }
 
-void tick_release_all(Tick_sink const *sink, Susnote_list *susnotes,
-                      double *next_note_off) {
+void tick_release_all(Tick_sink const *sink, Susnote_list *susnotes) {
+  if (susnotes->count == 0)
+    return; // the buffer may be NULL, and NULL + 0 is undefined
   send_note_offs(sink, susnotes->buffer, susnotes->buffer + susnotes->count);
   susnote_list_clear(susnotes);
-  *next_note_off = 1.0;
 }
 
 // Sends a list of VM or engine events: steps 4 to 6 of the wire order in
 // tick.h.
 static void tick_send_events(Tick_sink const *sink, Susnote_list *susnotes,
-                             double frame_secs, Oevent const *events,
-                             Usz count, Usz tick_num) {
+                             Oevent const *events, Usz count, Usz tick_num) {
   enum { Midi_on_capacity = 512 };
   typedef struct {
     U8 channel;
@@ -194,7 +182,7 @@ static void tick_send_events(Tick_sink const *sink, Susnote_list *susnotes,
                            .note_number = (U8)note_number,
                            .velocity = em->velocity};
         new_susnotes[midi_note_count] =
-            (Susnote){.remaining = (float)(frame_secs * (double)em->duration),
+            (Susnote){.remaining = em->duration,
                       .chan_note = (U16)((channel << 8u) | note_number)};
         ++midi_note_count;
       }
@@ -227,20 +215,23 @@ static void tick_send_events(Tick_sink const *sink, Susnote_list *susnotes,
     }
   }
 
-  // Step 5 (tick.h), and again for the mono note-ons of step 6.
+  // Step 5 (tick.h), and again for the mono note-ons of step 6. If the list
+  // cannot grow, this batch is skipped: none of its note-offs or note-ons go
+  // out, so no note sounds without a sustained entry to release it.
 do_note_ons:
   if (midi_note_count > 0) {
     Usz start_note_offs, end_note_offs;
-    susnote_list_add_notes(susnotes, new_susnotes, midi_note_count,
-                           &start_note_offs, &end_note_offs);
-    if (start_note_offs != end_note_offs) {
-      Susnote const *restrict susnotes_off = susnotes->buffer;
-      send_note_offs(sink, susnotes_off + start_note_offs,
-                     susnotes_off + end_note_offs);
-    }
-    for (Usz i = 0; i < midi_note_count; ++i) {
-      Midi_note_on mno = midi_note_ons[i];
-      send_chan_msg(sink, 0x9, mno.channel, mno.note_number, mno.velocity);
+    if (susnote_list_add_notes(susnotes, new_susnotes, midi_note_count,
+                               &start_note_offs, &end_note_offs)) {
+      if (start_note_offs != end_note_offs) {
+        Susnote const *restrict susnotes_off = susnotes->buffer;
+        send_note_offs(sink, susnotes_off + start_note_offs,
+                       susnotes_off + end_note_offs);
+      }
+      for (Usz i = 0; i < midi_note_count; ++i) {
+        Midi_note_on mno = midi_note_ons[i];
+        send_chan_msg(sink, 0x9, mno.channel, mno.note_number, mno.velocity);
+      }
     }
   }
   if (monofied_chans) {
@@ -264,7 +255,7 @@ do_note_ons:
                          .note_number = midi_mono_ons[i].note_number,
                          .velocity = midi_mono_ons[i].velocity};
       new_susnotes[midi_note_count] = (Susnote){
-          .remaining = (float)(frame_secs * (double)midi_mono_ons[i].duration),
+          .remaining = midi_mono_ons[i].duration,
           .chan_note = (U16)((i << 8u) | midi_mono_ons[i].note_number)};
       midi_note_count++;
     }
@@ -284,22 +275,24 @@ void tick_run_vm(Glyph *restrict gbuffer, Mark *restrict mbuffer, Usz height,
 
 void tick_body(Tick_ctx const *ctx, Tick_sink const *sink) {
   // Steps 2 to 6 of the wire order in tick.h.
-  age_sustained_notes(sink, ctx->age_secs, ctx->susnotes, ctx->next_note_off);
+  age_sustained_notes(sink, ctx->susnotes);
   // The engine appends, so its list is cleared first: nothing left in it,
   // such as a preview's events, is ever sent (CAP-9).
   Oevent_list *engine = ctx->engine_list;
   oevent_list_clear(engine);
-  advance_midi_cc_interpolations(ctx->age_secs, engine);
+  // The engine advances one step per call and ignores its time argument
+  // (sim.c); B3 replaces it.
+  advance_midi_cc_interpolations(0.0, engine);
   if (engine->count > 0)
-    tick_send_events(sink, ctx->susnotes, ctx->frame_secs, engine->buffer,
-                     engine->count, *ctx->tick_num);
+    tick_send_events(sink, ctx->susnotes, engine->buffer, engine->count,
+                     *ctx->tick_num);
   Oevent_list *list = ctx->tick_list;
   tick_run_vm(ctx->gbuffer, ctx->mbuffer, ctx->height, ctx->width,
               *ctx->tick_num, list, ctx->random_seed, ctx->opstate);
   ++*ctx->tick_num;
   if (list->count > 0)
-    tick_send_events(sink, ctx->susnotes, ctx->frame_secs, list->buffer,
-                     list->count, *ctx->tick_num);
+    tick_send_events(sink, ctx->susnotes, list->buffer, list->count,
+                     *ctx->tick_num);
 }
 
 U64 tick_len_us(Usz bpm) {

@@ -28,6 +28,13 @@
   X(tick_wire_order)                                                           \
   X(tick_glide_engine_order)                                                   \
   X(tick_release_all)                                                          \
+  X(tick_note_length)                                                          \
+  X(tick_note_length_beat_clock)                                               \
+  X(tick_note_length_0_and_1)                                                  \
+  X(tick_note_release_order)                                                   \
+  X(tick_note_retrigger)                                                       \
+  X(tick_note_mono)                                                            \
+  X(tick_note_empty_list)                                                      \
   X(tick_run_vm_clears_list)                                                   \
   X(tick_len_us)
 

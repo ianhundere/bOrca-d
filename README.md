@@ -293,6 +293,26 @@ make clean       # removes build/
 
 Changes since boorch/bOrca `4f349cd` that alter how an existing patch plays, change what goes out over MIDI, or break the public `orca_run` API, newest first. Each entry has a one-line title, says what changed and why, shows a before/after example, and points at an updated or new patch under `examples/`. The id in brackets at the end of an entry (`P0.1`, `B2`, …) is the item in the fork's implementation spec, the same vocabulary the `.xfail` markers under `tests/` use.
 
+### With beat clock on, notes last their written length
+
+While Send MIDI Beat Clock was on (Ctrl+D, then Clock & Timing, or `midi_beat_clock = 1` in `orca.conf`), every note of length 1 or more lasted six times its written length. A note's remaining time was kept in seconds, one tick per unit of length. Under beat clock the loop wakes six times per tick to send the clock pulses, but the tick itself, where notes age, runs on only one of those wakeups, and it aged notes by a sixth of a tick, so a note took six times as many ticks to run out. Now a note's remaining time is a count of ticks: it is set to the note's length when the note sounds or is retriggered, and every tick takes one off it, whatever the clock source. A note that sounds in tick T goes off in tick T + its length, and lengths 0 and 1 go off in the next tick, as they always did with beat clock off.
+
+- This breaks patches made with beat clock on: their notes are now six times shorter than before, at their written length. The uConsole appliance plays its `default.orca` with `midi_beat_clock = 1`, so its notes change; whether that project changes too is decided when the appliance is repinned to this release. Written lengths top out at `z`, 35 ticks, so a beat-clock note that relied on lasting longer than 35 ticks now needs a retrigger (a slower `D`) or chained notes.
+- With beat clock off and a steady tempo, every note starts and stops on the same ticks as before, at any tempo below 15,000 BPM. Above that, notes used to end early, and now get their full length.
+- A held note keeps its count of ticks across a tempo change. Before, its remaining time stayed in seconds, so a note held while the BPM changed lasted more or fewer ticks than written.
+- The loop no longer wakes for a note-off deadline of its own, since note-offs only ever go out on a tick. If the sustained-note list cannot grow, the new notes it cannot hold are not sent, so none is left sounding without a note-off; before, bOrca crashed.
+
+Nothing else about what goes out, or its order, changes. For code that uses `tick.h`: `Susnote.remaining` is a `U8` count of ticks; `Tick_ctx` loses `age_secs`, `frame_secs` and `next_note_off`, and `tick_release_all` its `next_note_off` argument; `susnote_list_add_notes` returns `false`, leaving the list unchanged, when the list cannot grow; `susnote_list_advance_time` becomes `susnote_list_advance_tick`, which ages every note by one tick; and `susnote_list_soonest_deadline` is removed.
+
+Before → after, a length-4 note at 120 BPM with beat clock on (`Dz` on row 0, `:03C.4` two rows below, so it is banged only every 35 ticks), as `aseqdump` shows it on the uConsole:
+
+```
+before: Note on 36, 144 × Clock (3000 ms), Note off 36
+after:  Note on 36,  24 × Clock  (500 ms), Note off 36
+```
+
+No example patch: beat clock is a setting, not part of a patch, so the `aseqdump` check above shows the change, with any note of length 2 or more that is not banged again before it ends, and beat clock on. The unit tests `tick_note_length` and `tick_note_length_beat_clock` in `tests/unit/test_tick.c` check the lengths, the second with the shell's six clock pulses per tick modelled in the test. (B8)
+
 ### Resuming after a pause no longer re-sends the paused grid's notes and CCs
 
 While paused, bOrca runs the patch once on a throwaway copy whenever the grid needs redrawing, to colour the operators and their ports. That pass wrote its events into a list that the next tick also sent, and every tick asks for a redraw, so the first tick after every resume sent them too, edit or not: each note played twice (note-on, note-off, note-on), each CC and pitch bend went out twice, and a `!` with an interpolation rate registered its glide a second time. Two changes fix it, so the first tick after resume sends only that tick's events:

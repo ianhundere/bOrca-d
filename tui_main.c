@@ -1185,7 +1185,6 @@ typedef struct {
   U64 tick_len; // one tick at bpm, in microseconds; set with bpm (AD-14)
   U64 clock;
   double accum_secs;
-  double time_to_next_note_off;
   Oosc_dev *oosc_dev;
   Midi_mode midi_mode;
   Usz activity_counter;
@@ -1232,7 +1231,6 @@ static void ged_init(Ged *a, Usz undo_limit, Usz init_bpm, Usz init_seed) {
   ged_set_bpm(a, init_bpm);
   a->clock = 0;
   a->accum_secs = 0.0;
-  a->time_to_next_note_off = 1.0;
   a->oosc_dev = NULL;
   midi_mode_init_null(&a->midi_mode);
   a->activity_counter = 0;
@@ -1413,7 +1411,7 @@ static void send_num_message(Oosc_dev *oosc_dev, char const *osc_address,
 
 staticni void ged_stop_all_sustained_notes(Ged *a) {
   Tick_sink const sink = ged_sink(a);
-  tick_release_all(&sink, &a->susnote_list, &a->time_to_next_note_off);
+  tick_release_all(&sink, &a->susnote_list);
 }
 
 staticni void ged_clear_osc_udp(Ged *a) {
@@ -1441,6 +1439,8 @@ static bool ged_set_osc_udp(Ged *a, char const *dest_addr,
 
 static ORCA_FORCEINLINE double ms_to_sec(double ms) { return ms / 1000.0; }
 
+// Seconds to the next tick or beat-clock deadline, and no other: note-offs
+// only ever go out in a tick body, so they need no deadline of their own.
 static double ged_secs_to_deadline(Ged const *a) {
   if (!a->is_playing)
     return 1.0;
@@ -1452,9 +1452,6 @@ static double ged_secs_to_deadline(Ged const *a) {
   if (a->midi_bclock)
     secs_span /= 6.0;
   double rem = secs_span - (stm_sec(stm_since(a->clock)) + a->accum_secs);
-  double next_note_off = a->time_to_next_note_off;
-  if (next_note_off < rem)
-    rem = next_note_off;
   if (rem < 0.0)
     rem = 0.0;
   return rem;
@@ -1463,10 +1460,10 @@ static double ged_secs_to_deadline(Ged const *a) {
 staticni void ged_do_stuff(Ged *a) {
   if (!a->is_playing)
     return;
-  // One tick in seconds, which is also a note's length unit, and the span to
-  // the next deadline: a sixth of a tick under beat clock.
-  double frame_secs = 60.0 / (double)a->bpm / 4.0;
-  double secs_span = frame_secs;
+  // The span to the next deadline: one tick, or a sixth of a tick under beat
+  // clock. It only times the deadlines: sustained notes age by one tick per
+  // tick body (tick.c), so they keep their length under beat clock.
+  double secs_span = 60.0 / (double)a->bpm / 4.0;
   if (a->midi_bclock) // see also ged_secs_to_deadline()
     secs_span /= 6.0;
   bool crossed_deadline = false;
@@ -1526,10 +1523,7 @@ staticni void ged_do_stuff(Ged *a) {
                         .tick_num = &a->tick_num,
                         .tick_list = &a->oevent_list,
                         .engine_list = &a->engine_oevent_list,
-                        .susnotes = &a->susnote_list,
-                        .age_secs = secs_span,
-                        .frame_secs = frame_secs,
-                        .next_note_off = &a->time_to_next_note_off};
+                        .susnotes = &a->susnote_list};
   tick_body(&ctx, &sink);
   a->needs_remarking = true;
   a->is_draw_dirty = true;

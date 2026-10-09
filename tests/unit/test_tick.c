@@ -1,7 +1,8 @@
-// Unit tests for tick.c (spec item B4, spine AD-12 to AD-14): the tick body
-// on a recording sink, the CAP-9 resume test, the wire order within a tick,
-// the glide engine's place in it, release-all, tick_run_vm and tick_len_us.
-// Step numbers refer to the wire order in tick.h.
+// Unit tests for tick.c (spec items B4 and B8, spine AD-12 to AD-14): the
+// tick body on a recording sink, the CAP-9 resume test, the wire order within
+// a tick, the glide engine's place in it, release-all, the note lengths in
+// tick bodies (B8), tick_run_vm and tick_len_us. Step numbers refer to the
+// wire order in tick.h.
 //
 // sim.c's glide table is global until B3, so a glide left active would leak
 // into later runs. Only tick_glide_engine_order uses a CCI, and it drains the
@@ -20,12 +21,17 @@ typedef struct {
   int status, d1, d2;
 } Triple;
 
-// A sink that records every call, in order.
+// A sink that records every call, in order. Each MIDI triple is stamped with
+// body, which the test sets before each tick body, and with the number of
+// midi1 calls (the F8s, in the note-length tests) made before it.
 typedef struct {
   Triple midi3[Rec_capacity];
+  Usz midi3_body[Rec_capacity];
+  Usz midi3_pulses[Rec_capacity];
   Usz midi3_count;
   Usz midi1_count;
   Usz osc_count;
+  Usz body;
   bool overflow;
 } Recording;
 
@@ -35,6 +41,8 @@ static void rec_midi3(void *u, int status, int d1, int d2) {
     r->overflow = true;
     return;
   }
+  r->midi3_body[r->midi3_count] = r->body;
+  r->midi3_pulses[r->midi3_count] = r->midi1_count;
   r->midi3[r->midi3_count++] = (Triple){status, d1, d2};
 }
 
@@ -100,10 +108,6 @@ static void put(Glyph *grid, Usz width, Usz y, Usz x, char const *text) {
   memcpy(grid + y * width + x, text, strlen(text));
 }
 
-// One sixteenth at 120 BPM, in seconds: both the aging step and the length
-// unit of a note, as the shell passes them when beat clock is off.
-#define Secs_120 0.125
-
 // The CAP-9 patch: a note (ch 0, note 36), an instant CC (ch 0, CC 74, 64)
 // and a pitch bend (ch 0, LSB 127, MSB 61), each banged on every tick by the
 // D two rows above it, and a fourth D with nothing under it, where the edit
@@ -144,7 +148,6 @@ static void run_cap9(bool edit, bool preview, Recording *out,
   oevent_list_init(&engine_list);
   Susnote_list susnotes;
   susnote_list_init(&susnotes);
-  double next_note_off = 1.0;
   Usz tick_num = 0;
   Tick_ctx const ctx = {.gbuffer = grid,
                         .mbuffer = marks,
@@ -155,10 +158,7 @@ static void run_cap9(bool edit, bool preview, Recording *out,
                         .tick_num = &tick_num,
                         .tick_list = &tick_list,
                         .engine_list = &engine_list,
-                        .susnotes = &susnotes,
-                        .age_secs = Secs_120,
-                        .frame_secs = Secs_120,
-                        .next_note_off = &next_note_off};
+                        .susnotes = &susnotes};
 
   // 1 and 2: the tick sends the note-on, and pausing releases it.
   Recording before;
@@ -167,8 +167,8 @@ static void run_cap9(bool edit, bool preview, Recording *out,
   CHECK(engine_list.count == 0);
   CHECK(tick_num == 1);
   CHECK(susnotes.count == 1);
-  tick_release_all(&before_sink, &susnotes, &next_note_off);
-  CHECK(susnotes.count == 0 && next_note_off == 1.0);
+  tick_release_all(&before_sink, &susnotes);
+  CHECK(susnotes.count == 0);
   Triple const tick0[] = {
       {0xB0, 74, 64}, {0xE0, 127, 61}, {0x90, 36, 127}, {0x80, 36, 0}};
   CHECK(triples_are(&before, tick0, ORCA_ARRAY_COUNTOF(tick0)));
@@ -235,15 +235,15 @@ void test_tick_cap9_resume_without_edit(void) {
   CHECK(resumed.midi1_count == 0 && resumed.osc_count == 0);
 }
 
-// The wire order inside one tick body. Four sustained notes are seeded:
-// one due to age out, one that the grid's note retriggers, one on the
-// channel of the grid's mono note, and one that outlasts this tick's aging
-// step but not a whole tick. The sink receives the aged note-off, the CC and
-// the pitch bend in VM order, the retrigger note-off, the note-on, the mono
-// channel's note-off, then the mono note-on. The notes age by a sixth of a
-// tick, as under beat clock, while their length unit stays one tick, so the
-// two cannot be swapped unnoticed. (Step 1, the shell's F8, is
-// covered by the manual check; step 3 by tick_glide_engine_order.)
+// The wire order inside one tick body. Four sustained notes are seeded, with
+// their counts in ticks: one due to age out (1), one that the grid's note
+// retriggers (10), one on the channel of the grid's mono note (10), and one
+// that this tick ages but does not release (2). The sink receives the aged
+// note-off, the CC and the pitch bend in VM order, the retrigger note-off,
+// the note-on, the mono channel's note-off, then the mono note-on. (Step 1,
+// the shell's F8 in ged_do_stuff, is covered by the manual check;
+// tick_note_length_beat_clock only models it in test code. Step 3 is covered
+// by tick_glide_engine_order.)
 void test_tick_wire_order(void) {
   enum { H = 3, W = 32 };
   Glyph grid[H * W];
@@ -261,14 +261,14 @@ void test_tick_wire_order(void) {
   Susnote_list susnotes;
   susnote_list_init(&susnotes);
   Susnote const seeded[] = {
-      {.remaining = 0.02f, .chan_note = 3 << 8 | 60}, // ages out this tick
-      {.remaining = 10.0f, .chan_note = 1 << 8 | 36}, // retriggered
-      {.remaining = 10.0f, .chan_note = 2 << 8 | 50}, // on the mono channel
-      {.remaining = 0.05f, .chan_note = 4 << 8 | 70}, // outlasts this tick
+      {.remaining = 1, .chan_note = 3 << 8 | 60},  // ages out this tick
+      {.remaining = 10, .chan_note = 1 << 8 | 36}, // retriggered
+      {.remaining = 10, .chan_note = 2 << 8 | 50}, // on the mono channel
+      {.remaining = 2, .chan_note = 4 << 8 | 70},  // outlasts this tick
   };
   Usz start_removed, end_removed;
-  susnote_list_add_notes(&susnotes, seeded, ORCA_ARRAY_COUNTOF(seeded),
-                         &start_removed, &end_removed);
+  CHECK(susnote_list_add_notes(&susnotes, seeded, ORCA_ARRAY_COUNTOF(seeded),
+                               &start_removed, &end_removed));
   CHECK(susnotes.count == 4 && start_removed == end_removed);
 
   Opstate_store store;
@@ -276,7 +276,6 @@ void test_tick_wire_order(void) {
   Oevent_list tick_list, engine_list;
   oevent_list_init(&tick_list);
   oevent_list_init(&engine_list);
-  double next_note_off = 1.0;
   Usz tick_num = 0;
   Tick_ctx const ctx = {.gbuffer = grid,
                         .mbuffer = marks,
@@ -287,10 +286,7 @@ void test_tick_wire_order(void) {
                         .tick_num = &tick_num,
                         .tick_list = &tick_list,
                         .engine_list = &engine_list,
-                        .susnotes = &susnotes,
-                        .age_secs = Secs_120 / 6,
-                        .frame_secs = Secs_120,
-                        .next_note_off = &next_note_off};
+                        .susnotes = &susnotes};
   Recording rec;
   Tick_sink const sink = rec_sink(&rec);
   tick_body(&ctx, &sink);
@@ -309,23 +305,20 @@ void test_tick_wire_order(void) {
   CHECK(rec.midi1_count == 0 && rec.osc_count == 0);
   CHECK(tick_num == 1);
   CHECK(tick_list.count == 4);
-  // The retriggered and the mono note each last their length (4) times the
-  // length unit, not the aging step. The fourth note aged by one step only,
-  // and is now the soonest note-off.
+  // The retriggered and the mono note each hold their duration (4) in ticks,
+  // set after this body's aging step, and the fourth note lost one tick.
   CHECK(susnotes.count == 3);
-  float const aged = 0.05f - (float)(Secs_120 / 6);
   Usz lengths_ok = 0, aged_ok = 0;
   for (Usz i = 0; i < susnotes.count; ++i) {
     U16 cn = susnotes.buffer[i].chan_note;
-    float rem = susnotes.buffer[i].remaining;
-    if ((cn == (1 << 8 | 36) || cn == (2 << 8 | 40)) && rem == 0.5f)
+    U8 rem = susnotes.buffer[i].remaining;
+    if ((cn == (1 << 8 | 36) || cn == (2 << 8 | 40)) && rem == 4)
       ++lengths_ok;
-    if (cn == (4 << 8 | 70) && rem == aged)
+    if (cn == (4 << 8 | 70) && rem == 1)
       ++aged_ok;
   }
   CHECK(lengths_ok == 2);
   CHECK(aged_ok == 1);
-  CHECK(next_note_off == (double)aged);
 
   susnote_list_deinit(&susnotes);
   oevent_list_deinit(&tick_list);
@@ -357,7 +350,6 @@ void test_tick_glide_engine_order(void) {
   oevent_list_init(&engine_list);
   Susnote_list susnotes;
   susnote_list_init(&susnotes);
-  double next_note_off = 1.0;
   Usz tick_num = 0;
   Tick_ctx const ctx = {.gbuffer = grid,
                         .mbuffer = marks,
@@ -368,10 +360,7 @@ void test_tick_glide_engine_order(void) {
                         .tick_num = &tick_num,
                         .tick_list = &tick_list,
                         .engine_list = &engine_list,
-                        .susnotes = &susnotes,
-                        .age_secs = Secs_120,
-                        .frame_secs = Secs_120,
-                        .next_note_off = &next_note_off};
+                        .susnotes = &susnotes};
 
   // The first tick registers the glide; the engine has nothing to run yet.
   Recording first;
@@ -396,13 +385,15 @@ void test_tick_glide_engine_order(void) {
   CHECK(second.midi1_count == 0 && second.osc_count == 0);
 
   // The second tick's CCI registered the glide again: run the engine until
-  // it emits nothing, so the global table is left inactive.
+  // it emits nothing, so the global table is left inactive. The engine
+  // advances one step per call and ignores its time argument, as in
+  // tick_body.
   Oevent_list drain;
   oevent_list_init(&drain);
   Usz rounds = 0;
   do {
     oevent_list_clear(&drain);
-    advance_midi_cc_interpolations(Secs_120, &drain);
+    advance_midi_cc_interpolations(0.0, &drain);
     ++rounds;
   } while (drain.count > 0 && rounds < 64);
   CHECK(drain.count == 0);
@@ -415,30 +406,286 @@ void test_tick_glide_engine_order(void) {
 }
 
 // Release-all (pause, quit, an output change) sends a note-off for every
-// sustained note, clears the list and resets the note-off deadline.
+// sustained note and clears the list, whatever their counts.
 void test_tick_release_all(void) {
   Susnote_list susnotes;
   susnote_list_init(&susnotes);
   Susnote const seeded[] = {
-      {.remaining = 0.3f, .chan_note = 0 << 8 | 36},
-      {.remaining = 2.0f, .chan_note = 9 << 8 | 127},
+      {.remaining = 3, .chan_note = 0 << 8 | 36},
+      {.remaining = 20, .chan_note = 9 << 8 | 127},
   };
   Usz start_removed, end_removed;
-  susnote_list_add_notes(&susnotes, seeded, ORCA_ARRAY_COUNTOF(seeded),
-                         &start_removed, &end_removed);
-  double next_note_off = 0.3;
+  CHECK(susnote_list_add_notes(&susnotes, seeded, ORCA_ARRAY_COUNTOF(seeded),
+                               &start_removed, &end_removed));
   Recording rec;
   Tick_sink const sink = rec_sink(&rec);
-  tick_release_all(&sink, &susnotes, &next_note_off);
+  tick_release_all(&sink, &susnotes);
   sort_triples(&rec);
   Triple const want[] = {{0x80, 36, 0}, {0x89, 127, 0}};
   CHECK(triples_are(&rec, want, ORCA_ARRAY_COUNTOF(want)));
   CHECK(susnotes.count == 0);
-  CHECK(next_note_off == 1.0);
   // With nothing sustained it sends nothing.
   Tick_sink const again = rec_sink(&rec);
-  tick_release_all(&again, &susnotes, &next_note_off);
+  tick_release_all(&again, &susnotes);
   CHECK(rec.midi3_count == 0);
+  susnote_list_deinit(&susnotes);
+}
+
+// The note-length fixtures (B8). The grid holds D operators over note
+// operators. Dz bangs on ticks that are multiples of 35 only, so each of its
+// notes sounds once in a 35-tick window and no retrigger falls inside it.
+enum { Note_h = 3, Note_w = 32, Note_window = 35 };
+
+typedef struct {
+  Usz body; // the tick body, counted from the first one run
+  Triple t;
+} Stamped;
+
+static void note_grid(Glyph *grid) {
+  memset(grid, '.', (Usz)Note_h * Note_w);
+}
+
+// Runs `bodies` tick bodies over grid from tick `start`, recording into rec,
+// with every MIDI triple stamped with the body it went out in. With
+// beat_clock set, it models the shell's sixths gate (ged_do_stuff in
+// tui_main.c), which stays in the shell (AD-14): each tick is six pulses,
+// each pulse sends F8 through midi1, and the tick body runs after the F8 of
+// the pulse whose sixth is 0, so five more F8s follow it.
+static void run_note_bodies(Glyph *grid, Usz start, Usz bodies,
+                            bool beat_clock, Recording *rec) {
+  Mark marks[Note_h * Note_w];
+  Opstate_store store;
+  opstate_init(&store);
+  Oevent_list tick_list, engine_list;
+  oevent_list_init(&tick_list);
+  oevent_list_init(&engine_list);
+  Susnote_list susnotes;
+  susnote_list_init(&susnotes);
+  Usz tick_num = start;
+  Tick_ctx const ctx = {.gbuffer = grid,
+                        .mbuffer = marks,
+                        .height = Note_h,
+                        .width = Note_w,
+                        .random_seed = 0,
+                        .opstate = &store,
+                        .tick_num = &tick_num,
+                        .tick_list = &tick_list,
+                        .engine_list = &engine_list,
+                        .susnotes = &susnotes};
+  Tick_sink const sink = rec_sink(rec);
+  U8 bclock_sixths = 0; // as Ged.midi_bclock_sixths, 0 when play starts
+  for (Usz body = 0; body < bodies; ++body) {
+    rec->body = body;
+    if (!beat_clock) {
+      tick_body(&ctx, &sink);
+    } else {
+      for (int pulse = 0; pulse < 6; ++pulse) {
+        sink.midi1(sink.u, 0xF8);
+        U8 sixths = bclock_sixths;
+        bclock_sixths = (U8)((sixths + 1) % 6);
+        if (sixths == 0)
+          tick_body(&ctx, &sink);
+      }
+    }
+    CHECK(engine_list.count == 0);
+  }
+  CHECK(tick_num == start + bodies);
+  susnote_list_deinit(&susnotes);
+  oevent_list_deinit(&tick_list);
+  oevent_list_deinit(&engine_list);
+  opstate_free(&store);
+}
+
+// The recording holds exactly these triples, in this order, each in its
+// tick body.
+static bool timeline_is(Recording const *r, Stamped const *want, Usz count) {
+  if (r->overflow || r->midi3_count != count)
+    return false;
+  for (Usz i = 0; i < count; ++i) {
+    if (r->midi3_body[i] != want[i].body ||
+        triple_cmp(r->midi3[i], want[i].t) != 0)
+      return false;
+  }
+  return true;
+}
+
+// B8, beat clock off: a duration-4 note that sounds in tick body T goes off
+// in body T + 4, and nothing else goes out in the window.
+void test_tick_note_length(void) {
+  Glyph grid[Note_h * Note_w];
+  note_grid(grid);
+  put(grid, Note_w, 0, 0, "Dz");
+  put(grid, Note_w, 2, 0, ":03C.4"); // note 36, 4 ticks
+  Recording rec;
+  run_note_bodies(grid, 0, Note_window, false, &rec);
+  Stamped const want[] = {{0, {0x90, 36, 127}}, {4, {0x80, 36, 0}}};
+  CHECK(timeline_is(&rec, want, ORCA_ARRAY_COUNTOF(want)));
+  CHECK(rec.midi1_count == 0 && rec.osc_count == 0);
+}
+
+// B8, beat clock on: the same note goes off in the same tick body, 24 F8s
+// after its note-on, where 1295c23 aged it by a sixth of a tick per body and
+// sent its note-off 144 F8s after.
+void test_tick_note_length_beat_clock(void) {
+  Glyph grid[Note_h * Note_w];
+  note_grid(grid);
+  put(grid, Note_w, 0, 0, "Dz");
+  put(grid, Note_w, 2, 0, ":03C.4");
+  Recording rec;
+  run_note_bodies(grid, 0, Note_window, true, &rec);
+  Stamped const want[] = {{0, {0x90, 36, 127}}, {4, {0x80, 36, 0}}};
+  CHECK(timeline_is(&rec, want, ORCA_ARRAY_COUNTOF(want)));
+  CHECK(rec.midi1_count == 6 * Note_window);
+  // The F8s are this test's model of the shell's gate, not tick.c output.
+  CHECK(rec.midi3_count >= 1 && rec.midi3_pulses[0] == 1);
+  CHECK(rec.midi3_count >= 2 &&
+        rec.midi3_pulses[1] - rec.midi3_pulses[0] == 24);
+  CHECK(rec.osc_count == 0);
+}
+
+// B8: durations 0 and 1 both release in the next tick body, T + 1.
+void test_tick_note_length_0_and_1(void) {
+  Glyph grid[Note_h * Note_w];
+  note_grid(grid);
+  put(grid, Note_w, 0, 0, "Dz");
+  put(grid, Note_w, 2, 0, ":03C.0"); // note 36, duration 0
+  put(grid, Note_w, 0, 8, "Dz");
+  put(grid, Note_w, 2, 8, ":03D.1"); // note 38, duration 1
+  Recording rec;
+  run_note_bodies(grid, 0, Note_window, false, &rec);
+  Stamped const want[] = {
+      {0, {0x90, 36, 127}}, {0, {0x90, 38, 127}}, // step 5, in VM order
+      {1, {0x80, 38, 0}},   {1, {0x80, 36, 0}},   // step 2, swap order
+  };
+  CHECK(timeline_is(&rec, want, ORCA_ARRAY_COUNTOF(want)));
+}
+
+// B8: three notes that sound in one tick body and release in the same later
+// body go off in the aging step's swap order: the 2nd, the 3rd, then the
+// 1st, as in 1295c23.
+void test_tick_note_release_order(void) {
+  Glyph grid[Note_h * Note_w];
+  note_grid(grid);
+  put(grid, Note_w, 0, 0, "Dz");
+  put(grid, Note_w, 2, 0, ":03C.4"); // 1st: note 36
+  put(grid, Note_w, 0, 8, "Dz");
+  put(grid, Note_w, 2, 8, ":03D.4"); // 2nd: note 38
+  put(grid, Note_w, 0, 16, "Dz");
+  put(grid, Note_w, 2, 16, ":03E.4"); // 3rd: note 40
+  Recording rec;
+  run_note_bodies(grid, 0, Note_window, false, &rec);
+  Stamped const want[] = {
+      {0, {0x90, 36, 127}}, {0, {0x90, 38, 127}}, {0, {0x90, 40, 127}},
+      {4, {0x80, 38, 0}},   {4, {0x80, 40, 0}},   {4, {0x80, 36, 0}},
+  };
+  CHECK(timeline_is(&rec, want, ORCA_ARRAY_COUNTOF(want)));
+}
+
+// The retrigger and mono fixtures start at tick 35, where Dz bangs and 6D6
+// (period 36) does not; 6D6 bangs at tick 36, one body later. Neither bangs
+// again before tick 70, so the window holds one bang of each.
+enum { Late_start = 35 };
+
+// B8: the same channel and note sounds again before its release. The old
+// note's off goes out at once (step 5), as in 1295c23; its old count is
+// dropped, and the only later off is at the new end. Note 36 is retriggered
+// longer (4 ticks, then 6) and note 38 shorter (8, then 3), so an old count
+// that was kept, or that outlived the new one, would send an off at an old
+// end (body 0 + 4 or 0 + 8) or miss a new one (body 1 + 6 or 1 + 3).
+void test_tick_note_retrigger(void) {
+  Glyph grid[Note_h * Note_w];
+  note_grid(grid);
+  put(grid, Note_w, 0, 0, "Dz");
+  put(grid, Note_w, 2, 0, ":03C.4"); // note 36, 4 ticks, at tick 35
+  put(grid, Note_w, 0, 8, "Dz");
+  put(grid, Note_w, 2, 8, ":03D.8"); // note 38, 8 ticks, at tick 35
+  put(grid, Note_w, 0, 15, "6D6");
+  put(grid, Note_w, 2, 16, ":03C.6"); // note 36 again, 6 ticks, at tick 36
+  put(grid, Note_w, 0, 23, "6D6");
+  put(grid, Note_w, 2, 24, ":03D.3"); // note 38 again, 3 ticks, at tick 36
+  Recording rec;
+  run_note_bodies(grid, Late_start, Note_window, false, &rec);
+  Stamped const want[] = {
+      {0, {0x90, 36, 127}}, // the first notes, in VM order
+      {0, {0x90, 38, 127}},
+      {1, {0x80, 36, 0}},   // step 5: the old notes' offs, at once,
+      {1, {0x80, 38, 0}},
+      {1, {0x90, 36, 127}}, //         then the new note-ons
+      {1, {0x90, 38, 127}},
+      {4, {0x80, 38, 0}},   // note 38's new end, body 1 + 3
+      {7, {0x80, 36, 0}},   // note 36's new end, body 1 + 6
+  };
+  CHECK(timeline_is(&rec, want, ORCA_ARRAY_COUNTOF(want)));
+}
+
+// B8: a mono note on a channel with a sustained note. The mono round sends
+// the sustained note's off, then the mono note-on (step 6), as in 1295c23;
+// the mono note's count is its duration, so it goes off 3 bodies later, and
+// the removed note sends nothing at its old end (body 0 + 8).
+void test_tick_note_mono(void) {
+  Glyph grid[Note_h * Note_w];
+  note_grid(grid);
+  put(grid, Note_w, 0, 0, "Dz");
+  put(grid, Note_w, 2, 0, ":03E.8"); // note 40, 8 ticks, at tick 35
+  put(grid, Note_w, 0, 8, "6D6");
+  put(grid, Note_w, 2, 9, "%03C.3"); // mono note 36, 3 ticks, at tick 36
+  Recording rec;
+  run_note_bodies(grid, Late_start, Note_window, false, &rec);
+  Stamped const want[] = {
+      {0, {0x90, 40, 127}},
+      {1, {0x80, 40, 0}},   // step 6: the channel's sustained note-off,
+      {1, {0x90, 36, 127}}, //         then the mono note-on
+      {4, {0x80, 36, 0}},   // the mono note's end
+  };
+  CHECK(timeline_is(&rec, want, ORCA_ARRAY_COUNTOF(want)));
+}
+
+// B8: with no sustained notes, release-all and the aging step send nothing
+// and touch no buffer: a list that never held a note keeps its NULL buffer.
+// The empty-list guards themselves (no NULL + 0) are checked by reading the
+// code: GCC's UBSan does not report NULL + 0, so this test cannot see them.
+void test_tick_note_empty_list(void) {
+  Susnote_list susnotes;
+  susnote_list_init(&susnotes);
+  Recording rec;
+  Tick_sink const sink = rec_sink(&rec);
+  tick_release_all(&sink, &susnotes);
+  CHECK(rec.midi3_count == 0);
+  CHECK(susnotes.buffer == NULL && susnotes.count == 0);
+
+  // A tick body on a grid with no note operator ages the empty list.
+  enum { H = Note_h, W = Note_w };
+  Glyph grid[H * W];
+  Mark marks[H * W];
+  note_grid(grid);
+  put(grid, W, 0, 0, "D1");
+  put(grid, W, 2, 0, "!0.74g."); // an instant CC, so the body sends something
+  Opstate_store store;
+  opstate_init(&store);
+  Oevent_list tick_list, engine_list;
+  oevent_list_init(&tick_list);
+  oevent_list_init(&engine_list);
+  Usz tick_num = 0;
+  Tick_ctx const ctx = {.gbuffer = grid,
+                        .mbuffer = marks,
+                        .height = H,
+                        .width = W,
+                        .random_seed = 0,
+                        .opstate = &store,
+                        .tick_num = &tick_num,
+                        .tick_list = &tick_list,
+                        .engine_list = &engine_list,
+                        .susnotes = &susnotes};
+  tick_body(&ctx, &sink);
+  tick_body(&ctx, &sink);
+  CHECK(engine_list.count == 0);
+  Triple const want[] = {{0xB0, 74, 64}, {0xB0, 74, 64}};
+  CHECK(triples_are(&rec, want, ORCA_ARRAY_COUNTOF(want)));
+  CHECK(susnotes.buffer == NULL && susnotes.count == 0);
+
+  oevent_list_deinit(&tick_list);
+  oevent_list_deinit(&engine_list);
+  opstate_free(&store);
   susnote_list_deinit(&susnotes);
 }
 

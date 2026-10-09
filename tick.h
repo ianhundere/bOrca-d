@@ -28,8 +28,14 @@ typedef struct {
 // note is specified when it is first triggered, so the orca VM itself is not
 // responsible for sending the note-off event. We keep a list of currently 'on'
 // notes so that they can have a matching 'off' sent at the correct time.
+//
+// A note's remaining time is a count of tick bodies (spine AD-14): it is set
+// to the note's duration (Oevent_midi_note.duration, 0..127) when the note
+// sounds or is retriggered, and each tick body ages it by one, whatever the
+// clock source. A note that sounds in tick body T is released in body
+// T + duration, and durations 0 and 1 both release in body T + 1.
 typedef struct {
-  float remaining;
+  U8 remaining; // tick bodies left
   U16 chan_note;
 } Susnote;
 
@@ -41,24 +47,27 @@ typedef struct {
 void susnote_list_init(Susnote_list *sl);
 void susnote_list_deinit(Susnote_list *sl);
 void susnote_list_clear(Susnote_list *sl);
-void susnote_list_add_notes(Susnote_list *sl, Susnote const *restrict notes,
+// Adds notes, replacing any sustained note with the same channel and note,
+// and sets [*start_removed, *end_removed) to the replaced notes, which are
+// kept in the buffer past count for their note-offs. Returns false if the
+// list cannot grow: then the list is unchanged and the out-params are not
+// set, and the caller sends none of this batch's note-ons, so no note is left
+// sounding without a sustained entry.
+bool susnote_list_add_notes(Susnote_list *sl, Susnote const *restrict notes,
                             Usz count, Usz *restrict start_removed,
                             Usz *restrict end_removed);
-void susnote_list_advance_time(
-    Susnote_list *sl, double delta_time, Usz *restrict start_removed,
-    Usz *restrict end_removed,
-    // 1.0 if no notes remain or none are shorter than 1.0
-    double *soonest_deadline);
+// Ages every sustained note by one tick body. A note with 1 or fewer left is
+// released, and the others lose one. Sets [*start_removed, *end_removed) to
+// the released notes, kept in the buffer past count for their note-offs.
+void susnote_list_advance_tick(Susnote_list *sl, Usz *restrict start_removed,
+                               Usz *restrict end_removed);
 void susnote_list_remove_by_chan_mask(Susnote_list *sl, Usz chan_mask,
                                       Usz *restrict start_removed,
                                       Usz *restrict end_removed);
 
-// Returns 1.0 if no notes remain or none are shorter than 1.0
-double susnote_list_soonest_deadline(Susnote_list const *sl);
-
 // One tick of the sequencer, as the internal tick deadline runs it. The
-// shell owns everything the pointers reach. The doubles are seconds and
-// belong to B4's note aging, which B8 replaces with tick counts.
+// shell owns everything the pointers reach. Nothing in it is a time:
+// sustained notes age by one tick per tick body, under every clock source.
 typedef struct {
   Glyph *gbuffer;
   Mark *mbuffer;
@@ -69,14 +78,12 @@ typedef struct {
   Oevent_list *tick_list;   // the VM's events, then sent
   Oevent_list *engine_list; // the glide engine's output: cleared, then sent
   Susnote_list *susnotes;
-  double age_secs;       // how far sustained notes age per tick body
-  double frame_secs;     // seconds per unit of note length
-  double *next_note_off; // the soonest sustained-note deadline, in seconds
 } Tick_ctx;
 
 // The tick body. Within a tick, the wire order is:
 //   1. F8, when beat clock is on: sent by the shell, before tick_body;
-//   2. the note-offs of sustained notes that age out;
+//   2. every sustained note ages by one tick, and the note-offs of those
+//      that run out go out;
 //   3. the glide engine's output: the engine list is cleared, the engine
 //      runs into it, and its CCs go out;
 //   then the VM runs into the tick list, ++*tick_num, and the tick list goes
@@ -97,10 +104,10 @@ void tick_run_vm(Glyph *restrict gbuffer, Mark *restrict mbuffer, Usz height,
                  Usz width, Usz tick_num, Oevent_list *list, Usz random_seed,
                  Opstate_store *opstate);
 
-// Sends a note-off for every sustained note, clears the list and sets
-// *next_note_off to 1.0. Used on pause, on quit and when the output changes.
-void tick_release_all(Tick_sink const *sink, Susnote_list *susnotes,
-                      double *next_note_off);
+// Sends a note-off for every sustained note and clears the list. With no
+// sustained notes it sends nothing and touches no buffer. Used on pause, on
+// quit and when the output changes.
+void tick_release_all(Tick_sink const *sink, Susnote_list *susnotes);
 
 // One tick (a sixteenth note) at bpm, in microseconds:
 // (15000000 + bpm / 2) / bpm, rounded half-up and never below 1. bpm 0
