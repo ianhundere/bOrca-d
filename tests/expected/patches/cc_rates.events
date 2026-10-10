@@ -1,0 +1,10 @@
+t0 CCI ch0 cc74 target64 rate0
+t0 CCI ch3 cc71 target127 rate35
+t0 GRID
+D1.......D1.......
+*!0.74g0.*!3.71wz.
+t1 CCI ch0 cc74 target64 rate0
+t1 CCI ch3 cc71 target127 rate35
+t1 GRID
+D1.......D1.......
+*!0.74g0.*!3.71wz.

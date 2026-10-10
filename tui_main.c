@@ -1,4 +1,5 @@
 #include "base.h"
+#include "ccout.h"
 #include "field.h"
 #include "gbuffer.h"
 #include "opstate.h"
@@ -39,9 +40,9 @@ static void alsa_request_shutdown(int signo) {
 // (architecture spine AD-13), and the only clock read this series adds; the
 // existing stm_now() reads are unchanged. stm_now() returns nanoseconds on
 // every platform (sokol_time.h:169-185), so this divides in integer
-// arithmetic rather than calling stm_us(), which goes through a double. B3's
-// engine poll is its first caller; until then it is unused.
-ORCA_OK_IF_UNUSED static U64 now_us(void) { return stm_now() / 1000; }
+// arithmetic rather than calling stm_us(), which goes through a double. The
+// tick body reads it once, for the CC engine's poll and submits.
+static U64 now_us(void) { return stm_now() / 1000; }
 
 #if NCURSES_VERSION_PATCH < 20081122
 int _nc_has_mouse(void);
@@ -1171,11 +1172,16 @@ typedef struct {
   // The three event lists (AD-12). oevent_list is the tick list: the VM's
   // events on each tick, sent, and shown by Ctrl+E. scratch_oevent_list is
   // the paused re-mark's (the preview's) and is never sent.
-  // engine_oevent_list is the glide engine's output, cleared before each run
-  // and then sent.
+  // engine_oevent_list is the CC engine's output, cleared before each poll
+  // or submit and then sent.
   Oevent_list oevent_list;
   Oevent_list scratch_oevent_list;
   Oevent_list engine_oevent_list;
+  // The CC engine (AD-9, AD-10): every CC of the tick path goes through it,
+  // and it keeps the glides and the last value sent on each controller. The
+  // shell drives its lifecycle: cancel on pause, cancel and forget on open
+  // and new, forget when the output changes.
+  Ccout_engine ccout;
   Susnote_list susnote_list;
   Ged_cursor ged_cursor;
   Usz tick_num;
@@ -1206,7 +1212,7 @@ typedef struct {
 } Ged;
 
 // Every write of the tempo goes through here, so tick_len always matches it.
-// Nothing reads tick_len until B3's glide engine.
+// The tick body hands it to the CC engine's glide submits (tick.h).
 static void ged_set_bpm(Ged *a, Usz bpm) {
   a->bpm = bpm;
   a->tick_len = tick_len_us(bpm);
@@ -1223,6 +1229,9 @@ static void ged_init(Ged *a, Usz undo_limit, Usz init_bpm, Usz init_seed) {
   oevent_list_init(&a->oevent_list);
   oevent_list_init(&a->scratch_oevent_list);
   oevent_list_init(&a->engine_oevent_list);
+  // No clock here: ged_init runs before stm_setup().
+  ccout_init(&a->ccout);
+  ccout_configure(&a->ccout, 100); // glide_hz; I2 makes it a setting
   susnote_list_init(&a->susnote_list);
   ged_cursor_init(&a->ged_cursor);
   a->tick_num = 0;
@@ -1513,7 +1522,9 @@ staticni void ged_do_stuff(Ged *a) {
       return;
   }
   // The tick body (tick.c) sends everything else for this tick: note-offs
-  // that are due, the glide engine's CCs, then the VM's events.
+  // that are due, the CC engine's glide steps, then the VM's events, each CC
+  // through the engine. The clock is read once, after the sixths gate: the
+  // engine's poll and every submit in the body share this time (AD-13).
   Tick_ctx const ctx = {.gbuffer = a->field.buffer,
                         .mbuffer = a->mbuf_r.buffer,
                         .height = a->field.height,
@@ -1523,7 +1534,10 @@ staticni void ged_do_stuff(Ged *a) {
                         .tick_num = &a->tick_num,
                         .tick_list = &a->oevent_list,
                         .engine_list = &a->engine_oevent_list,
-                        .susnotes = &a->susnote_list};
+                        .susnotes = &a->susnote_list,
+                        .ccout = &a->ccout,
+                        .now_us = now_us(),
+                        .tick_len = a->tick_len};
   tick_body(&ctx, &sink);
   a->needs_remarking = true;
   a->is_draw_dirty = true;
@@ -2041,6 +2055,9 @@ staticni void ged_set_playing(Ged *a, bool playing) {
     send_control_message(a->oosc_dev, "/orca/started");
   } else {
     ged_stop_all_sustained_notes(a);
+    // Pause, and quit through it, ends every glide and keeps the last values
+    // sent, so the next glide starts from them (AD-9).
+    ccout_cancel(&a->ccout);
     a->is_playing = false;
     send_control_message(a->oosc_dev, "/orca/stopped");
     if (a->midi_bclock)
@@ -2987,6 +3004,11 @@ staticni bool tui_restart_osc_udp_if_enabled_diderror(Tui *t) {
   } else {
     ged_clear_osc_udp(&t->ged);
   }
+  // Under --osc-midi-bidule, MIDI goes out over this OSC connection, so
+  // restarting it changes the output: the CC engine forgets the last values
+  // sent (AD-9). This also runs once at startup, where the engine is fresh.
+  if (t->ged.midi_mode.any.type == Midi_mode_type_osc_bidule)
+    ccout_forget(&t->ged.ccout);
   return error;
 }
 staticni void tui_restart_osc_udp_showerror(void) {
@@ -3187,6 +3209,8 @@ staticni Tui_menus_result tui_drive_menus(Tui *t, int key) {
             memset(t->ged.field.buffer, '.',
                    new_field_h * new_field_w * sizeof(Glyph));
             opstate_clear(&t->ged.opstate);
+            ccout_cancel(&t->ged.ccout);
+            ccout_forget(&t->ged.ccout);
             ged_cursor_confine(&t->ged.ged_cursor, new_field_h, new_field_w);
             mbuf_reusable_ensure_size(&t->ged.mbuf_r, new_field_h, new_field_w);
             ged_update_internal_geometry(&t->ged);
@@ -3275,6 +3299,8 @@ staticni Tui_menus_result tui_drive_menus(Tui *t, int key) {
         ged_stop_all_sustained_notes(&t->ged);
         midi_mode_deinit(&t->ged.midi_mode);
         PmError pme = midi_mode_init_portmidi(&t->ged.midi_mode, act.picked.id);
+        // A new output knows none of the values sent (AD-9).
+        ccout_forget(&t->ged.ccout);
         qnav_stack_pop();
         if (pme) {
           qmsg_printf_push("PortMidi Error",
@@ -3314,6 +3340,8 @@ staticni Tui_menus_result tui_drive_menus(Tui *t, int key) {
               field_load_file(osoc(temp_name), &t->ged.field);
           if (fle == Field_load_error_ok) {
             opstate_clear(&t->ged.opstate);
+            ccout_cancel(&t->ged.ccout);
+            ccout_forget(&t->ged.ccout);
             qnav_stack_pop();
             osoputoso(&t->file_name, temp_name);
             mbuf_reusable_ensure_size(&t->ged.mbuf_r, t->ged.field.height,

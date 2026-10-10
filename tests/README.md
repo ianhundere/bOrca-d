@@ -86,7 +86,7 @@ replaced the glibc `rand()` stream they held before, when it removed
 `rand()` from `sim.c` (spine AD-1), and B6 replaces them again when it fixes
 `r`. B6 proves the no-repeat and permutation properties in a unit test.
 
-Seven characterization goldens pin, unmarked, what the operators that
+Eight characterization goldens pin, unmarked, what the operators that
 Phase 1 touches produce today, so a refactor that changes their output
 fails a case. Three are replaced, not marked, by the Phase 2 item that
 redefines their operator: `bouncer_shapes` by I3, and `arp_patterns` and the
@@ -98,6 +98,7 @@ redefines their operator: `bouncer_shapes` by I3, and `arp_patterns` and the
 | `arp_patterns` | `;` ranges 1–4 with every non-random pattern, ranges `0` and `z`, a bang every 3 ticks, and a clocked pattern change that restarts the step | none | I4 |
 | `seeded_random` | `R` with a lowercase, an uppercase and a `0` max, and `;` pattern `c`, under a non-zero seed | `--seed 7` | I4 (its `;` rows) |
 | `cc_instant` | `!` at rate `.` on CC 1 and CC 74 with values `0`, `g`, `v` and `w` (clamped to 127), sent again on every tick; a channel above 15 that sends nothing, a hundreds digit (CC 100), and controller 130 clamped to 127 | `-t 2` | none |
+| `cc_rates` | the VM's classification of `!` at rates `0` and `z`: still `CCI`, with the rate index (0 and 35) (B3, spine AD-11). `cli` runs no CC engine, so the unit test `tick_cci_same_tick` checks that both go out in the tick that bangs them | `-t 2` | none |
 | `pitch_bend` | `?` with MSB and LSB at `0`, `z` and between, and a channel above 15 that sends nothing | `-t 2` | none |
 | `scale_selectors` | `$` with every digit and lowercase selector at degrees 0, 2, 5 and 9 (with `$3Ca2` and `$3C02`), other roots, no octave, input octave `a` clamped to 9, and a result above octave 9 that writes nothing | `-t 1` | none |
 | `chord_notes` | `=` with every digit and lowercase chord at velocity `.` and at `z`, an octave-9 chord that drops the notes above 127, input octave `a` clamped to 9, a channel above 15, and `:13Cf1` | `-t 1` | none |
@@ -154,9 +155,10 @@ without `UBSAN_OPTIONS`. CI and the commands above still set
 runner's defaults.
 
 `tool` defines the CORE list once (today `gbuffer.c vmio.c sim.c
-opstate.c tick.c`; the other extracted core modules join it later). `tick.c`
-is shell code, the tick body and the sustained-note list, held to the core
-rules (spine AD-14), so the unit tests can drive it through a recording sink.
+opstate.c ccout.c tick.c`; the other extracted core modules join it later).
+`tick.c` is shell code, the tick body and the sustained-note list, held to
+the core rules (spine AD-14), so the unit tests can drive it through a
+recording sink.
 `cli`, `orca` and `test` link all of it, and
 `./tool sources <core|cli|orca|test>` prints a list, one file per line, so
 the checks below and the CI `armhf` job read the same lists.
@@ -239,10 +241,9 @@ canary is detected and every result is PASS or XFAIL.
   `gcc -c -std=c99 -O2 -DNDEBUG -g0 -fno-pie -no-pie -fno-lto` and fails
   each writable symbol (class `B b C D d G g S s V v`) that `nm -P` lists
   and no marker covers, and a file with no symbol at all. Markers name a
-  symbol or a prefix, so a new writable global in `sim.c` fails unless a
-  marker matches its name; one named `chord_*` or `scale_*` joins that
-  XFAIL line instead. The canary `tests/nm/canary.c` holds one writable
-  symbol of each class `b`, `d`, `B` and `D`, each with its address
+  symbol or a prefix; the marker set is empty since B3, so any writable
+  global in a CORE file fails. The canary `tests/nm/canary.c` holds one
+  writable symbol of each class `b`, `d`, `B` and `D`, each with its address
   escaping. On every run the check must flag all four by name, and its
   marker code must sort them with a built-in marker set:
   `canary_static_*` matches both statics, `canary_extern_init` its one
@@ -251,8 +252,7 @@ canary is detected and every result is PASS or XFAIL.
   Otherwise the check is blind and the run fails. Symbols are listed in C
   collation. The script is Linux/ELF only: elsewhere it exits 2.
 
-Today they print, on the uConsole's gcc 12.2 (the `chord_*` line lists all
-62 chord tables; it is cut short here):
+Today they print, on the uConsole's gcc 12.2:
 
 ```text
 $ tests/check-includes.sh
@@ -261,19 +261,18 @@ PASS  gbuffer.c
 PASS  vmio.c
 PASS  sim.c
 PASS  opstate.c
+PASS  ccout.c
 PASS  tick.c
-include check: 5 files, 5 pass, 0 xfail, 0 fail, 0 xpass; canary detected
+include check: 6 files, 6 pass, 0 xfail, 0 fail, 0 xpass; canary detected
 $ tests/check-nm.sh
 PASS  canary (detected: D canary_extern_init, B canary_extern_zero, d canary_static_init, b canary_static_zero; marker path: canary_extern_zero unmarked, canary_absent matches none)
 PASS  gbuffer.c
 PASS  vmio.c
-XFAIL sim.c midicc_interp_states (B3: b midicc_interp_states)
-XFAIL sim.c last_random_unique (B3: D last_random_unique)
-XFAIL sim.c chord_* (B3: d chord_aug, d chord_aug7, d chord_aug7_inv, … d chord_sus4_rich)
-XFAIL sim.c scale_* (B3: d scale_dorian, d scale_fifths, d scale_hirajoshi, d scale_iwato, d scale_lydian, d scale_major, d scale_minor, d scale_mixolydian, d scale_pentatonic, d scale_tetratonic)
+PASS  sim.c
 PASS  opstate.c
+PASS  ccout.c
 PASS  tick.c
-nm check: 5 files, 4 pass, 4 xfail, 0 fail, 0 xpass; canary detected
+nm check: 6 files, 6 pass, 0 xfail, 0 fail, 0 xpass; canary detected
 ```
 
 In the summaries, `pass` counts clean files, and `xfail`, `fail` and `xpass`
@@ -287,7 +286,7 @@ count results, so one file can add several.
 | Marker file | Line format | Today |
 | --- | --- | --- |
 | `tests/xfail/include-check` | `<file> <pattern> <item...>`, where the pattern is `rand`, `<name.h>` or `"name.h"` | none (B1 deleted `sim.c rand B1`) |
-| `tests/xfail/nm-check` | `<file> <symbol\|glob> <item>`, where the pattern is a symbol name, or a literal prefix of at least 3 characters followed by one trailing `*` (`chord_*`) | `midicc_interp_states`, `last_random_unique`, `chord_*` and `scale_*` for B3 (B1 deleted its three lines) |
+| `tests/xfail/nm-check` | `<file> <symbol\|glob> <item>`, where the pattern is a symbol name, or a literal prefix of at least 3 characters followed by one trailing `*` (`chord_*`) | none (B1 deleted its three lines and B3 its four) |
 
 - The items are the spec items the fix waits for, each matching
   `^(B[1-8]|I[1-6])$` (`B1`, `I3`); an nm marker names exactly one. A
@@ -300,15 +299,16 @@ count results, so one file can add several.
   none, so each item removes the lines of the symbols it deletes, as B1
   did. A writable symbol that no line of its file matches fails as
   `FAIL <file> <class> <name> (unmarked symbol)`.
-- The `chord_*` and `scale_*` globs cover the 72 tables that stay writable
-  because `scales` and `scales_and_chords` hold their addresses; B3 makes
-  them `const`. The tables nothing addresses show as `r` only because gcc
-  places never-written statics in read-only data. That is not proof that
-  they are `const` at every pointer level, as AD-1 requires: this `-O2`
-  recipe cannot show it, so B3 checks the declarations. The XFAIL lines
-  name every matched symbol, so a CI log records the runner gcc's list,
-  which may differ from the uConsole's; that log is the evidence for any
-  marker change.
+- B3 made every lookup table in `sim.c` `const` at every pointer level and
+  deleted the `chord_*` and `scale_*` lines, which covered the 72 tables
+  that stayed writable because `scales` and `scales_and_chords` held their
+  addresses. At `-O2` a table that nothing addresses or writes shows as `r`
+  even when it is not `const`, because gcc places never-written statics in
+  read-only data, so this recipe cannot prove AD-1's rule. B3 checked the
+  declarations and recorded a one-off `-O0` `nm` of `sim.o` that lists no
+  writable symbol. An XFAIL line names every symbol it matched, so a CI log
+  records the runner gcc's list, which may differ from the uConsole's; that
+  log is the evidence for any marker change.
 - A marker that names a file outside CORE, a malformed line, any other nm
   pattern (`*_*`, `_*`, `sc*`, `sca?`) or a duplicate (file, pattern) fails
   the run. An nm marker never hides an object with no symbols or a failed

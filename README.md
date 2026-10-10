@@ -233,7 +233,7 @@ The MIDI CC operator sends MIDI Control Change messages. The control number is s
 - `Ct`: Tens digit of control number (0-9) or `.` to omit  
 - `Co`: Ones digit of control number (0-9) or `.` to omit
 - `V`: Control value (0-z) - maps to MIDI CC values in increments of 4
-- `R`: Interpolation rate (0-z) - `.` for instant, 1-z for interpolated transitions
+- `R`: Interpolation rate (0-z) - `.`, `0` and `z` for instant, `1`-`y` to glide over 36 − rate ticks
 
 ### Common MIDI CC Values
 - `0` → 0 (minimum)
@@ -248,18 +248,21 @@ The MIDI CC operator sends MIDI Control Change messages. The control number is s
 - `!3..7g.` - Sends MIDI CC #7 (volume) on channel 3 with value 64 (half volume), instant
 - `!3..7w.` - Sends MIDI CC #7 (volume) on channel 3 with value 127 (full volume), instant
 - `!3.01o.` - Sends MIDI CC #1 (mod wheel) on channel 3 with value 96, instant
-- `!3..7g5` - Sends MIDI CC #7 on channel 3 with value 64, interpolated at rate 5
-- `!3..7w1` - Sends MIDI CC #7 on channel 3 with value 127, slowly interpolated (rate 1)
+- `!3..7g5` - Sends MIDI CC #7 on channel 3 with value 64, interpolated at rate 5 from the last value sent (it jumps to 64 if nothing has been sent on that control yet)
+- `!3..7w1` - Sends MIDI CC #7 on channel 3 with value 127, slowly interpolated (rate 1) from the last value sent (it jumps to 127 if nothing has been sent on that control yet)
 
 ### Interpolation
 
-When the 6th parameter (interpolation rate) is provided and not `.`, the operator will smoothly transition the CC value from its current position to the target value over multiple frames. This allows for smooth parameter sweeps and reduces the "staircase" effect of Orca's discrete timing.
+When the 6th parameter (interpolation rate) is `1` to `y`, the operator glides the CC from its current value to the target, at most one step per tick, instead of jumping. This allows for smooth parameter sweeps and reduces the "staircase" effect of Orca's discrete timing.
 
-- **Rate `.`**: Instant change (default behavior)
-- **Rate `1`**: Slowest interpolation (many steps)
-- **Rate `z`**: Fastest interpolation (few steps)
+- **Rates `.`, `0` and `z`**: instant. The value goes out at once, in the tick that bangs the operator. Uppercase reads like lowercase, so `Z` is instant too, and any other glyph counts as `0`, so it is instant.
+- **Rates `1` to `y`**: a glide over 36 − rate ticks: `1` takes 35 ticks (the slowest), `w` 4 and `y` 2. Its length is fixed in time when it starts, so a tempo change while it runs does not move its end.
+- **Where a glide starts**: from the CC's current value, which is where a glide already running on that channel and control has got to, or else the last value bOrca sent to it. If bOrca has sent nothing to that control since it started, since the file was opened or created, or since the MIDI output changed, the glide jumps straight to its target. To glide from a known value, send it first with an instant `!`.
+- **Banging it again**: banging the same glide again (the same target and rate) while it runs leaves it running, so a `!` banged on every tick still reaches its target on time. A new target or rate starts a new glide from the current value, and a target equal to the current value stops the glide and sends nothing. An instant `!` on the same control stops a running glide.
+- **Steps**: a glide sends a step only when the value changes, at most 100 per second on one control, and a glide that runs to its end finishes on its target. A value already reached is not sent again while the operator keeps banging.
+- **Pausing** stops every running glide where it is; the next glide starts from the last value sent.
 
-The interpolation system maintains separate state for each channel+control combination, allowing multiple CCs to interpolate independently.
+Each channel and control has its own glide, so several CCs glide independently.
 
 The operator automatically clamps control numbers above 127 to 127 to ensure valid MIDI CC range. Values use increments of 4 for predictable and musical MIDI CC values.
 
@@ -292,6 +295,33 @@ make clean       # removes build/
 ## Changelog
 
 Changes since boorch/bOrca `4f349cd` that alter how an existing patch plays, change what goes out over MIDI, or break the public `orca_run` API, newest first. Each entry has a one-line title, says what changed and why, shows a before/after example, and points at an updated or new patch under `examples/`. The id in brackets at the end of an entry (`P0.1`, `B2`, …) is the item in the fork's implementation spec, the same vocabulary the `.xfail` markers under `tests/` use.
+
+### CC glides continue from the last value sent
+
+A `!` glide (any rate but `.`) started from 0 whenever no glide was running on its channel and control, so a glide that followed a finished one restarted from 0. Every CC now goes through one CC engine, which remembers the last value sent on each channel and control and starts each glide from there, or from where a running glide has got to. The engine is also the only place a rate becomes a length, and it de-duplicates glide steps. This breaks patches that rely on the old sound:
+
+- A glide continues from the last value sent. After a glide to 64, a glide to 80 at `w` went 20, 40, 60, 80 and now goes 68, 72, 76, 80.
+- Banging the same glide again (the same target and rate) while it runs no longer restarts it from where it is. A `!` banged on every tick at `w` toward 64, from a control at 0 (after an instant `!`), went 16, 28, 37, 44 … and reached 64 only after about 17 ticks; it now goes 16, 32, 48, 64 and stops. On a control with nothing sent yet, it now jumps to 64 once.
+- A glide sends a step only when the value changes, and a target already reached is no longer sent again on every tick. A glide from 0 to 2 at rate `s` (28, 8 ticks) went 0, 1, 1, 1, 1, 2, 2, 2 and now goes 1, 2. A synth that missed the target gets it again only from an instant `!`.
+- Rates `0` and `z` are instant, like `.`: their CC now goes out in the tick that bangs the operator, in order with that tick's other CCs. Before, it went out one tick later, ahead of that tick's events.
+- A glide on a control that bOrca has sent nothing to jumps straight to its target. Before, it glided up from 0. To glide from a known value, send it first with an instant `!` (as the example patch does).
+- An instant `!` on a control stops a glide running there. Before, the glide kept stepping over it.
+- Pausing, opening a file and creating a new one stop every running glide; before, a paused glide carried on when playback resumed. Opening, creating a new file and changing the MIDI output (the PortMidi output menu, or restarting OSC under `--osc-midi-bidule`) also forget the last values sent, so the next glide on each control jumps to its target.
+- A glide's length is fixed in time when it starts: 36 − rate ticks at the tempo of that moment. A tempo change while it runs no longer changes when it ends; before, it always took 36 − rate ticks at whatever tempo followed.
+- A glide's steps follow the clock: each tick sends the value for the time it runs. A tick that runs late can send the target minus 1 and the target one tick later, and ticks that catch up after a stall send fewer steps. Before, each tick moved a glide one step, however late it ran.
+
+The engine still steps glides only on ticks, as before, and at most 100 times per second on one control, a limit that tempos above about 1,500 BPM reach, and so can ticks catching up back to back after a stall. Nothing else about what goes out, or its order, changes: an instant CC from a `!` with rate `.` always goes out, even when it repeats the last value.
+
+For embedders, an API break: `sim.h` drops `process_interpolated_midi_cc_event`, `advance_midi_cc_interpolations`, `last_random_unique` and `midi_panic`. A build that lists the core sources itself must add `ccout.c`, the new engine (`ccout.h`). For code that uses `tick.h`: `Tick_ctx` gains `ccout`, the engine, which the caller sets up with `ccout_init` and keeps across ticks, and `now_us` and `tick_len`, the tick's time and one tick's length in microseconds. The caller drives the engine as the TUI does: `ccout_cancel` on pause, `ccout_cancel` then `ccout_forget` on open and new, `ccout_forget` when the output changes, and a `now_us` that never goes back.
+
+Before → after, one 12-tick period of `examples/misc/glide_continuity.orca` (CC 74 on channel 0: 0 at tick 0, a glide to 64 at `w` from tick 2, a glide to 80 at `w` from tick 7), as `aseqdump` shows it on the uConsole:
+
+```
+before: 0, 16, 32, 48, 64, 20, 40, 60, 80
+after:  0, 16, 32, 48, 64, 68, 72, 76, 80
+```
+
+Example: `examples/misc/glide_continuity.orca`; repro patch for the instant rates: `tests/patches/cc_rates.orca`. (B3)
 
 ### With beat clock on, notes last their written length
 

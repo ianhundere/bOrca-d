@@ -23,10 +23,39 @@
   X(sim_two_r_permutations)                                                    \
   X(sim_preview_isolation)                                                     \
   X(sim_clear_and_prune)                                                       \
+  X(ccout_glide_continuity)                                                    \
+  X(ccout_glide_from_instant)                                                  \
+  X(ccout_unknown_last_value)                                                  \
+  X(ccout_instant_rates)                                                       \
+  X(ccout_instant_cancels_glide)                                               \
+  X(ccout_noop_submit)                                                         \
+  X(ccout_noop_step_held_back)                                                 \
+  X(ccout_early_end)                                                           \
+  X(ccout_dedup)                                                               \
+  X(ccout_glide_hz)                                                            \
+  X(ccout_fixed_length)                                                        \
+  X(ccout_retarget)                                                            \
+  X(ccout_same_glide_again)                                                    \
+  X(ccout_same_target_new_rate)                                                \
+  X(ccout_same_glide_new_tempo)                                                \
+  X(ccout_cancel_keeps_last_value)                                             \
+  X(ccout_forget)                                                              \
+  X(ccout_next_deadline)                                                       \
+  X(ccout_time_goes_back)                                                      \
+  X(ccout_worst_case_magnitude)                                                \
+  X(ccout_moving_target)                                                       \
+  X(ccout_rule_unknown_before_same)                                            \
+  X(ccout_rule_same_before_noop)                                               \
+  X(ccout_tick_len_guards)                                                     \
+  X(ccout_poll_before_start)                                                   \
+  X(ccout_poll_slot_order)                                                     \
+  X(ccout_init_and_configure)                                                  \
   X(tick_cap9_resume_after_edit)                                               \
   X(tick_cap9_resume_without_edit)                                             \
   X(tick_wire_order)                                                           \
-  X(tick_glide_engine_order)                                                   \
+  X(tick_cci_same_tick)                                                        \
+  X(tick_engine_poll_order)                                                    \
+  X(tick_engine_cc_path)                                                       \
   X(tick_release_all)                                                          \
   X(tick_note_length)                                                          \
   X(tick_note_length_beat_clock)                                               \

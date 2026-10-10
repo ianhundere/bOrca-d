@@ -4,13 +4,3 @@
 # matched, or XPASS, which fails the run, once it matches none: the series
 # that removes a symbol deletes its line in the same commit. A writable
 # symbol that no line matches fails the run. See tests/README.md.
-
-# B3 moves the glide state into a caller-owned struct and deletes
-# last_random_unique.
-sim.c midicc_interp_states B3
-sim.c last_random_unique B3
-
-# B3 makes sim.c's lookup tables const. These tables stay writable today
-# because scales and scales_and_chords hold their addresses.
-sim.c chord_* B3
-sim.c scale_* B3

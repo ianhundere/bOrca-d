@@ -37,7 +37,7 @@ typedef struct {
   U8 oevent_type;
   U8 channel, control;
   U8 target_value;
-  U8 interpolation_rate; // 0 = instant, 1-35 = interpolation speed
+  U8 interpolation_rate; // the rate index: 0 and 35 are instant, 1-34 glide
 } Oevent_midi_cc_interpolated;
 
 typedef struct {

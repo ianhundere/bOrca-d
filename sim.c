@@ -2,11 +2,8 @@
 #include "gbuffer.h"
 #include <string.h>
 
-// stored unique random value
-Usz last_random_unique = UINT_MAX;
-
 // Note Sequence
-static char note_sequence[] = "CcDdEFfGgAaB";
+static char const note_sequence[] = "CcDdEFfGgAaB";
 
 Usz find_note_index(Glyph root_note_glyph) {
   for (Usz i = 0; i < sizeof(note_sequence) - 1; i++) {
@@ -249,116 +246,6 @@ BEGIN_OPERATOR(movement)
     gbuffer[y * width + x] = '*';
   }
 END_OPERATOR
-
-// MIDI CC Interpolation State Management
-typedef struct {
-  bool active;
-  double current_value;    // Current interpolated value (0-127)
-  double target_value;     // Target value (0-127)
-  double step_size;        // Step increment per sub-frame
-  double steps_remaining;  // Remaining interpolation steps
-  U8 channel;              // MIDI channel
-  U8 control;              // MIDI control number
-  Usz last_tick;           // Last tick this was updated
-} Midicc_interp_state;
-
-#define MAX_MIDICC_INTERP_STATES 4096
-static Midicc_interp_state midicc_interp_states[MAX_MIDICC_INTERP_STATES] = {0};
-
-// Function to process interpolated MIDI CC events and update states
-void process_interpolated_midi_cc_event(Oevent_midi_cc_interpolated const *event, Usz tick_number) {
-  // Calculate unique state index based on channel and control
-  // This ensures each CC channel+control combination has its own interpolation state
-  Usz state_index = ((Usz)event->channel * 128 + event->control) % MAX_MIDICC_INTERP_STATES;
-  Midicc_interp_state *state = &midicc_interp_states[state_index];
-  
-  // Convert interpolation rate (0-35) to actual steps
-  // Rate 0 = instant (1 step), rate 1 = slow (many steps), rate 35 = fast (few steps)
-  double steps_per_frame = 1.0; // Default to instant
-  if (event->interpolation_rate > 0) {
-    // Map rate 1-35 to interpolation speeds
-    // Lower rate = slower interpolation = more steps
-    // Higher rate = faster interpolation = fewer steps
-    steps_per_frame = 36.0 - (double)event->interpolation_rate; // Rate 1 = 35 steps, rate 35 = 1 step
-  }
-  
-  double target_value = (double)event->target_value;
-  
-  // Initialize or update state
-  if (!state->active || state->channel != event->channel || 
-      state->control != event->control) {
-    // New interpolation or different CC - start fresh
-    state->active = true;
-    state->channel = event->channel;
-    state->control = event->control;
-    // Start from current value or 0 for new CC
-    state->current_value = 0.0; // TODO: Could track actual current value
-    state->target_value = target_value;
-    if (steps_per_frame > 1.0) {
-      state->steps_remaining = steps_per_frame;
-      state->step_size = (target_value - state->current_value) / steps_per_frame;
-    } else {
-      // Instant mode - jump to target immediately
-      state->current_value = target_value;
-      state->steps_remaining = 1.0; // Will generate one event then stop
-      state->step_size = 0;
-    }
-  } else {
-    // Continuing interpolation - calculate new path to target from current position
-    double delta = target_value - state->current_value;
-    state->target_value = target_value;
-    if (steps_per_frame > 1.0 && delta != 0.0) {
-      state->steps_remaining = steps_per_frame;
-      state->step_size = delta / steps_per_frame;
-    } else {
-      // Instant mode or no change needed
-      state->current_value = target_value;
-      state->steps_remaining = 1.0; // Will generate one event then stop
-      state->step_size = 0;
-    }
-  }
-  
-  state->last_tick = tick_number;
-}
-
-// Function to advance all active interpolations and generate MIDI CC events
-void advance_midi_cc_interpolations(double delta_time, Oevent_list *oevent_list) {
-  for (Usz i = 0; i < MAX_MIDICC_INTERP_STATES; i++) {
-    Midicc_interp_state *state = &midicc_interp_states[i];
-    
-    if (!state->active || state->steps_remaining <= 0) {
-      continue;
-    }
-    
-    // Advance interpolation based on delta time
-    // For simplicity, we advance by one step per frame, but could use delta_time for sub-frame accuracy
-    double steps_to_advance = 1.0; // Could be: delta_time * interpolation_speed_factor
-    (void)delta_time; // Mark as used to avoid warning
-    
-    state->current_value += state->step_size * steps_to_advance;
-    state->steps_remaining -= steps_to_advance;
-    
-    // Clamp to target if we've reached or passed it
-    if ((state->step_size > 0 && state->current_value >= state->target_value) ||
-        (state->step_size < 0 && state->current_value <= state->target_value) ||
-        state->steps_remaining <= 0) {
-      state->current_value = state->target_value;
-      state->steps_remaining = 0;
-      state->active = false; // Mark as complete
-    }
-    
-    // Clamp to valid MIDI range
-    if (state->current_value > 127.0) state->current_value = 127.0;
-    if (state->current_value < 0.0) state->current_value = 0.0;
-    
-    // Generate MIDI CC event with interpolated value
-    Oevent_midi_cc *oe = (Oevent_midi_cc *)oevent_list_alloc_item(oevent_list);
-    oe->oevent_type = Oevent_type_midi_cc;
-    oe->channel = state->channel;
-    oe->control = state->control;
-    oe->value = (U8)(state->current_value + 0.5); // Round to nearest integer
-  }
-}
 
 BEGIN_OPERATOR(midicc)
   PORT(0, 1, IN | PARAM, "Channel");
@@ -820,95 +707,95 @@ END_OPERATOR
 // BOORCH's new Scale OP - Unified Scale/Chord System
 
 // SCALES (0-9) - Essential scales only
-static Usz scale_major[] = {0, 2, 4, 5, 7, 9, 11};         // 0: Major
-static Usz scale_minor[] = {0, 2, 3, 5, 7, 8, 10};         // 1: Minor
-static Usz scale_dorian[] = {0, 2, 3, 5, 7, 9, 10};        // 2: Dorian
-static Usz scale_lydian[] = {0, 2, 4, 6, 7, 9, 11};        // 3: Lydian
-static Usz scale_mixolydian[] = {0, 2, 4, 5, 7, 9, 10};    // 4: Mixolydian
-static Usz scale_pentatonic[] = {0, 2, 4, 7, 9};           // 5: Pentatonic
-static Usz scale_hirajoshi[] = {0, 2, 3, 7, 8};            // 6: Hirajoshi
-static Usz scale_iwato[] = {0, 1, 5, 6, 10};               // 7: Iwato
-static Usz scale_tetratonic[] = {0, 4, 7, 11};             // 8: Tetratonic
-static Usz scale_fifths[] = {0, 7};                        // 9: Fifths
+static Usz const scale_major[] = {0, 2, 4, 5, 7, 9, 11};         // 0: Major
+static Usz const scale_minor[] = {0, 2, 3, 5, 7, 8, 10};         // 1: Minor
+static Usz const scale_dorian[] = {0, 2, 3, 5, 7, 9, 10};        // 2: Dorian
+static Usz const scale_lydian[] = {0, 2, 4, 6, 7, 9, 11};        // 3: Lydian
+static Usz const scale_mixolydian[] = {0, 2, 4, 5, 7, 9, 10};    // 4: Mixolydian
+static Usz const scale_pentatonic[] = {0, 2, 4, 7, 9};           // 5: Pentatonic
+static Usz const scale_hirajoshi[] = {0, 2, 3, 7, 8};            // 6: Hirajoshi
+static Usz const scale_iwato[] = {0, 1, 5, 6, 10};               // 7: Iwato
+static Usz const scale_tetratonic[] = {0, 4, 7, 11};             // 8: Tetratonic
+static Usz const scale_fifths[] = {0, 7};                        // 9: Fifths
 
 // ENRICHED CHORDS FOR MIDICHORD 0-9 (Approach 2: Enriched versions of a-j)
-static Usz chord_major_rich[] = {0, 4, 7, 12};             // 0: Major + octave root (C-E-G-C)
-static Usz chord_minor_rich[] = {0, 3, 7, 12};             // 1: Minor + octave root (C-Eb-G-C)
-static Usz chord_sus4_rich[] = {0, 5, 7, 12};              // 2: Sus4 + octave root (C-F-G-C)
-static Usz chord_sus2_rich[] = {0, 2, 7, 12};              // 3: Sus2 + octave root (C-D-G-C)
-static Usz chord_major7_rich[] = {0, 4, 7, 11, 16};        // 4: Major7 + octave 3rd (C-E-G-B-E)
-static Usz chord_minor7_rich[] = {0, 3, 7, 10, 15};        // 5: Minor7 + octave 3rd (C-Eb-G-Bb-Eb)
-static Usz chord_dom7_rich[] = {0, 4, 7, 10, 19};          // 6: Dom7 + octave 5th (C-E-G-Bb-G)
-static Usz chord_major6_rich[] = {0, 4, 7, 9, 12};         // 7: Major6 + octave root (C-E-G-A-C)
-static Usz chord_minor6_rich[] = {0, 3, 7, 9, 12};         // 8: Minor6 + octave root (C-Eb-G-A-C)
-static Usz chord_dim_rich[] = {0, 3, 6, 12};               // 9: Dim + octave root (C-Eb-Gb-C)
+static Usz const chord_major_rich[] = {0, 4, 7, 12};             // 0: Major + octave root (C-E-G-C)
+static Usz const chord_minor_rich[] = {0, 3, 7, 12};             // 1: Minor + octave root (C-Eb-G-C)
+static Usz const chord_sus4_rich[] = {0, 5, 7, 12};              // 2: Sus4 + octave root (C-F-G-C)
+static Usz const chord_sus2_rich[] = {0, 2, 7, 12};              // 3: Sus2 + octave root (C-D-G-C)
+static Usz const chord_major7_rich[] = {0, 4, 7, 11, 16};        // 4: Major7 + octave 3rd (C-E-G-B-E)
+static Usz const chord_minor7_rich[] = {0, 3, 7, 10, 15};        // 5: Minor7 + octave 3rd (C-Eb-G-Bb-Eb)
+static Usz const chord_dom7_rich[] = {0, 4, 7, 10, 19};          // 6: Dom7 + octave 5th (C-E-G-Bb-G)
+static Usz const chord_major6_rich[] = {0, 4, 7, 9, 12};         // 7: Major6 + octave root (C-E-G-A-C)
+static Usz const chord_minor6_rich[] = {0, 3, 7, 9, 12};         // 8: Minor6 + octave root (C-Eb-G-A-C)
+static Usz const chord_dim_rich[] = {0, 3, 6, 12};               // 9: Dim + octave root (C-Eb-Gb-C)
 
 // Separate scale arrays for Scale operator (0-9)
-static Usz *scales[] = {
+static Usz const *const scales[] = {
     scale_major, scale_minor, scale_dorian, scale_lydian, scale_mixolydian,
     scale_pentatonic, scale_hirajoshi, scale_iwato, scale_tetratonic, scale_fifths
 };
 
-static Usz scale_lengths[] = {7, 7, 7, 7, 7, 5, 5, 5, 4, 2};
+static Usz const scale_lengths[] = {7, 7, 7, 7, 7, 5, 5, 5, 4, 2};
 
 // CHORDS ROOT POSITION (a-z) - 26 most common chords
-static Usz chord_major[] = {0, 4, 7};                      // a: Major
-static Usz chord_minor[] = {0, 3, 7};                      // b: Minor
-static Usz chord_sus4[] = {0, 5, 7};                       // c: Sus4
-static Usz chord_sus2[] = {0, 2, 7};                       // d: Sus2
-static Usz chord_major7[] = {0, 4, 7, 11};                 // e: Major 7
-static Usz chord_minor7[] = {0, 3, 7, 10};                 // f: Minor 7
-static Usz chord_dom7[] = {0, 4, 7, 10};                   // g: Dominant 7
-static Usz chord_min_maj7[] = {0, 3, 7, 11};               // h: Minor Major 7
-static Usz chord_minor6[] = {0, 3, 7, 9};                  // i: Minor 6
-static Usz chord_major6[] = {0, 4, 7, 9};                  // j: Major 6
-static Usz chord_major9[] = {0, 4, 7, 11, 14};             // k: Major 9
-static Usz chord_minor9[] = {0, 3, 7, 10, 14};             // l: Minor 9
-static Usz chord_major_add9[] = {0, 4, 7, 14};             // m: Major add9
-static Usz chord_minor_add9[] = {0, 3, 7, 14};             // n: Minor add9
-static Usz chord_dim[] = {0, 3, 6};                        // o: Diminished
-static Usz chord_half_dim[] = {0, 3, 6, 10};               // p: Half Diminished
-static Usz chord_dim7[] = {0, 3, 6, 9};                    // q: Diminished 7
-static Usz chord_aug[] = {0, 4, 8};                        // r: Augmented
-static Usz chord_aug7[] = {0, 4, 8, 10};                   // s: Augmented 7
-static Usz chord_dom9[] = {0, 4, 7, 10, 14};               // t: Dominant 9
-static Usz chord_dom7b9[] = {0, 4, 7, 10, 13};             // u: Dominant 7b9
-static Usz chord_dom7sharp9[] = {0, 4, 7, 10, 15};         // v: Dominant 7#9
-static Usz chord_maj_6_9[] = {0, 4, 7, 9, 14};             // w: Major 6/9
-static Usz chord_min_6_9[] = {0, 3, 7, 9, 14};             // x: Minor 6/9
-static Usz chord_min11[] = {0, 3, 7, 10, 17};              // y: Minor 11
-static Usz chord_min7b5[] = {0, 3, 6, 10};                 // z: Minor 7b5 (alt. half-dim)
+static Usz const chord_major[] = {0, 4, 7};                      // a: Major
+static Usz const chord_minor[] = {0, 3, 7};                      // b: Minor
+static Usz const chord_sus4[] = {0, 5, 7};                       // c: Sus4
+static Usz const chord_sus2[] = {0, 2, 7};                       // d: Sus2
+static Usz const chord_major7[] = {0, 4, 7, 11};                 // e: Major 7
+static Usz const chord_minor7[] = {0, 3, 7, 10};                 // f: Minor 7
+static Usz const chord_dom7[] = {0, 4, 7, 10};                   // g: Dominant 7
+static Usz const chord_min_maj7[] = {0, 3, 7, 11};               // h: Minor Major 7
+static Usz const chord_minor6[] = {0, 3, 7, 9};                  // i: Minor 6
+static Usz const chord_major6[] = {0, 4, 7, 9};                  // j: Major 6
+static Usz const chord_major9[] = {0, 4, 7, 11, 14};             // k: Major 9
+static Usz const chord_minor9[] = {0, 3, 7, 10, 14};             // l: Minor 9
+static Usz const chord_major_add9[] = {0, 4, 7, 14};             // m: Major add9
+static Usz const chord_minor_add9[] = {0, 3, 7, 14};             // n: Minor add9
+static Usz const chord_dim[] = {0, 3, 6};                        // o: Diminished
+static Usz const chord_half_dim[] = {0, 3, 6, 10};               // p: Half Diminished
+static Usz const chord_dim7[] = {0, 3, 6, 9};                    // q: Diminished 7
+static Usz const chord_aug[] = {0, 4, 8};                        // r: Augmented
+static Usz const chord_aug7[] = {0, 4, 8, 10};                   // s: Augmented 7
+static Usz const chord_dom9[] = {0, 4, 7, 10, 14};               // t: Dominant 9
+static Usz const chord_dom7b9[] = {0, 4, 7, 10, 13};             // u: Dominant 7b9
+static Usz const chord_dom7sharp9[] = {0, 4, 7, 10, 15};         // v: Dominant 7#9
+static Usz const chord_maj_6_9[] = {0, 4, 7, 9, 14};             // w: Major 6/9
+static Usz const chord_min_6_9[] = {0, 3, 7, 9, 14};             // x: Minor 6/9
+static Usz const chord_min11[] = {0, 3, 7, 10, 17};              // y: Minor 11
+static Usz const chord_min7b5[] = {0, 3, 6, 10};                 // z: Minor 7b5 (alt. half-dim)
 
 // CHORDS FIRST INVERSION (A-Z) - Same chords but inverted
-static Usz chord_major_inv[] = {0, 3, 8};                  // A: Major 1st inv
-static Usz chord_minor_inv[] = {0, 4, 9};                  // B: Minor 1st inv  
-static Usz chord_sus4_inv[] = {0, 2, 7};                   // C: Sus4 1st inv
-static Usz chord_sus2_inv[] = {0, 5, 10};                  // D: Sus2 1st inv
-static Usz chord_major7_inv[] = {0, 3, 7, 8};              // E: Major 7 1st inv
-static Usz chord_minor7_inv[] = {0, 4, 7, 9};              // F: Minor 7 1st inv
-static Usz chord_dom7_inv[] = {0, 3, 6, 8};                // G: Dominant 7 1st inv
-static Usz chord_min_maj7_inv[] = {0, 4, 8, 9};            // H: Minor Major 7 1st inv
-static Usz chord_minor6_inv[] = {0, 4, 6, 9};              // I: Minor 6 1st inv
-static Usz chord_major6_inv[] = {0, 3, 5, 8};              // J: Major 6 1st inv
-static Usz chord_major9_inv[] = {0, 3, 7, 10, 11};         // K: Major 9 1st inv
-static Usz chord_minor9_inv[] = {0, 4, 7, 11, 12};         // L: Minor 9 1st inv
-static Usz chord_major_add9_inv[] = {0, 3, 10, 11};        // M: Major add9 1st inv
-static Usz chord_minor_add9_inv[] = {0, 4, 11, 12};        // N: Minor add9 1st inv
-static Usz chord_dim_inv[] = {0, 3, 9};                    // O: Diminished 1st inv
-static Usz chord_half_dim_inv[] = {0, 3, 7, 9};            // P: Half Diminished 1st inv
-static Usz chord_dim7_inv[] = {0, 3, 6, 9};                // Q: Diminished 7 1st inv
-static Usz chord_aug_inv[] = {0, 4, 8};                    // R: Augmented 1st inv (same as root)
-static Usz chord_aug7_inv[] = {0, 4, 6, 8};                // S: Augmented 7 1st inv
-static Usz chord_dom9_inv[] = {0, 3, 6, 10, 11};           // T: Dominant 9 1st inv
-static Usz chord_dom7b9_inv[] = {0, 3, 6, 9, 11};          // U: Dominant 7b9 1st inv
-static Usz chord_dom7sharp9_inv[] = {0, 3, 6, 11, 12};     // V: Dominant 7#9 1st inv
-static Usz chord_maj_6_9_inv[] = {0, 3, 5, 10, 11};        // W: Major 6/9 1st inv
-static Usz chord_min_6_9_inv[] = {0, 4, 6, 11, 12};        // X: Minor 6/9 1st inv
-static Usz chord_min11_inv[] = {0, 4, 7, 14, 15};          // Y: Minor 11 1st inv
-static Usz chord_min7b5_inv[] = {0, 3, 7, 9};              // Z: Minor 7b5 1st inv
+static Usz const chord_major_inv[] = {0, 3, 8};                  // A: Major 1st inv
+static Usz const chord_minor_inv[] = {0, 4, 9};                  // B: Minor 1st inv  
+static Usz const chord_sus4_inv[] = {0, 2, 7};                   // C: Sus4 1st inv
+static Usz const chord_sus2_inv[] = {0, 5, 10};                  // D: Sus2 1st inv
+static Usz const chord_major7_inv[] = {0, 3, 7, 8};              // E: Major 7 1st inv
+static Usz const chord_minor7_inv[] = {0, 4, 7, 9};              // F: Minor 7 1st inv
+static Usz const chord_dom7_inv[] = {0, 3, 6, 8};                // G: Dominant 7 1st inv
+static Usz const chord_min_maj7_inv[] = {0, 4, 8, 9};            // H: Minor Major 7 1st inv
+static Usz const chord_minor6_inv[] = {0, 4, 6, 9};              // I: Minor 6 1st inv
+static Usz const chord_major6_inv[] = {0, 3, 5, 8};              // J: Major 6 1st inv
+static Usz const chord_major9_inv[] = {0, 3, 7, 10, 11};         // K: Major 9 1st inv
+static Usz const chord_minor9_inv[] = {0, 4, 7, 11, 12};         // L: Minor 9 1st inv
+static Usz const chord_major_add9_inv[] = {0, 3, 10, 11};        // M: Major add9 1st inv
+static Usz const chord_minor_add9_inv[] = {0, 4, 11, 12};        // N: Minor add9 1st inv
+static Usz const chord_dim_inv[] = {0, 3, 9};                    // O: Diminished 1st inv
+static Usz const chord_half_dim_inv[] = {0, 3, 7, 9};            // P: Half Diminished 1st inv
+static Usz const chord_dim7_inv[] = {0, 3, 6, 9};                // Q: Diminished 7 1st inv
+static Usz const chord_aug_inv[] = {0, 4, 8};                    // R: Augmented 1st inv (same as root)
+static Usz const chord_aug7_inv[] = {0, 4, 6, 8};                // S: Augmented 7 1st inv
+static Usz const chord_dom9_inv[] = {0, 3, 6, 10, 11};           // T: Dominant 9 1st inv
+static Usz const chord_dom7b9_inv[] = {0, 3, 6, 9, 11};          // U: Dominant 7b9 1st inv
+static Usz const chord_dom7sharp9_inv[] = {0, 3, 6, 11, 12};     // V: Dominant 7#9 1st inv
+static Usz const chord_maj_6_9_inv[] = {0, 3, 5, 10, 11};        // W: Major 6/9 1st inv
+static Usz const chord_min_6_9_inv[] = {0, 4, 6, 11, 12};        // X: Minor 6/9 1st inv
+static Usz const chord_min11_inv[] = {0, 4, 7, 14, 15};          // Y: Minor 11 1st inv
+static Usz const chord_min7b5_inv[] = {0, 3, 7, 9};              // Z: Minor 7b5 1st inv
 
 // Unified array of all scales and chords (0-9, a-z, A-Z)
-static Usz *scales_and_chords[] = {
+static Usz const *const scales_and_chords[] = {
     // Enriched chords for Midichord (0-9)
     chord_major_rich, chord_minor_rich, chord_sus4_rich, chord_sus2_rich, chord_major7_rich,
     chord_minor7_rich, chord_dom7_rich, chord_major6_rich, chord_minor6_rich, chord_dim_rich,
@@ -928,7 +815,7 @@ static Usz *scales_and_chords[] = {
 };
 
 // Lengths for scales and chords
-static Usz scale_chord_lengths[] = {
+static Usz const scale_chord_lengths[] = {
     // Enriched chords for Midichord (0-9)
     4, 4, 4, 4, 5, 5, 5, 5, 5, 4,
     // Chords root position (a-z) 
@@ -1107,7 +994,7 @@ BEGIN_OPERATOR(midichord)
     return;
 
   // Get pointer to the selected chord array and its length
-  Usz *chord = scales_and_chords[chord_idx];
+  Usz const *chord = scales_and_chords[chord_idx];
   Usz chord_len = scale_chord_lengths[chord_idx];
 
   // Track highest note played so far
@@ -1461,7 +1348,7 @@ END_OPERATOR
 
 // BOORCH's BOUNCER OP
 // Predefined waveform sequences
-static const char *waveforms[] = {
+static char const *const waveforms[] = {
     // Triangle (0)
     "00112233445566778899aabbccddeeffgghhiijjkkllmmnnooppqqrrstuvwxyzzyxwvutsrr"
     "qqppoonnmmllkkjjiihhggffeeddccbbaa99887766554433221100",

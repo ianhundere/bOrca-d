@@ -2,6 +2,7 @@
 // spine AD-12, AD-14). See tick.h.
 #include "tick.h"
 #include "base.h"
+#include "ccout.h"
 #include "gbuffer.h"
 #include "opstate.h"
 #include "sim.h"
@@ -135,10 +136,23 @@ void tick_release_all(Tick_sink const *sink, Susnote_list *susnotes) {
   susnote_list_clear(susnotes);
 }
 
-// Sends a list of VM or engine events: steps 4 to 6 of the wire order in
-// tick.h.
-static void tick_send_events(Tick_sink const *sink, Susnote_list *susnotes,
-                             Oevent const *events, Usz count, Usz tick_num) {
+// Sends the CC engine's output, which holds only Oevent_midi_cc items: step
+// 3 of the wire order in tick.h, and each submit's output in step 4. The
+// engine list never goes through tick_send_events, which would submit its
+// CCs to the engine again.
+static void send_engine_ccs(Tick_sink const *sink, Oevent_list const *engine) {
+  for (Usz i = 0; i < engine->count; ++i) {
+    Oevent_midi_cc const *ec = &engine->buffer[i].midi_cc;
+    send_chan_msg(sink, 0xb, ec->channel, ec->control, ec->value);
+  }
+}
+
+// Sends the VM's events: steps 4 to 6 of the wire order in tick.h.
+static void tick_send_events(Tick_ctx const *ctx, Tick_sink const *sink,
+                             Oevent const *events, Usz count) {
+  Susnote_list *susnotes = ctx->susnotes;
+  Ccout_engine *ccout = ctx->ccout;
+  Oevent_list *engine = ctx->engine_list;
   enum { Midi_on_capacity = 512 };
   typedef struct {
     U8 channel;
@@ -191,16 +205,24 @@ static void tick_send_events(Tick_sink const *sink, Susnote_list *susnotes,
     case Oevent_type_midi_cc: {
       Oevent_midi_cc const *ec = &e->midi_cc;
       // Step 4 (tick.h): CCs, pitch bends and OSC/UDP go out at once, in list
-      // order; notes wait for steps 5 and 6.
-      send_chan_msg(sink, 0xb, ec->channel, ec->control, ec->value);
+      // order; notes wait for steps 5 and 6. A CC is an instant: it goes
+      // through the engine, which always emits it, and out at once.
+      oevent_list_clear(engine);
+      ccout_submit_instant(ccout, ec->channel, ec->control, ec->value,
+                           ctx->now_us, engine);
+      send_engine_ccs(sink, engine);
       break;
     }
     case Oevent_type_midi_cc_interpolated: {
       Oevent_midi_cc_interpolated const *eci = &e->midi_cc_interpolated;
-      // Process the interpolation request to set up state for later processing
-      process_interpolated_midi_cc_event(eci, tick_num);
-      // The interpolation system will generate MIDI CC events during
-      // advance_midi_cc_interpolations()
+      // Whatever the engine emits for the submit (an instant rate, or a
+      // controller with no last value) goes out at once, in list order; a
+      // glide's steps go out in step 3 of later ticks.
+      oevent_list_clear(engine);
+      ccout_submit_glide(ccout, eci->channel, eci->control, eci->target_value,
+                         eci->interpolation_rate, ctx->tick_len, ctx->now_us,
+                         engine);
+      send_engine_ccs(sink, engine);
       break;
     }
     case Oevent_type_midi_pb: {
@@ -274,25 +296,21 @@ void tick_run_vm(Glyph *restrict gbuffer, Mark *restrict mbuffer, Usz height,
 }
 
 void tick_body(Tick_ctx const *ctx, Tick_sink const *sink) {
+  assert(ctx->ccout);
   // Steps 2 to 6 of the wire order in tick.h.
   age_sustained_notes(sink, ctx->susnotes);
-  // The engine appends, so its list is cleared first: nothing left in it,
-  // such as a preview's events, is ever sent (CAP-9).
+  // Step 3. The engine appends, so its list is cleared first: nothing left
+  // in it, such as a preview's events, is ever sent (CAP-9).
   Oevent_list *engine = ctx->engine_list;
   oevent_list_clear(engine);
-  // The engine advances one step per call and ignores its time argument
-  // (sim.c); B3 replaces it.
-  advance_midi_cc_interpolations(0.0, engine);
-  if (engine->count > 0)
-    tick_send_events(sink, ctx->susnotes, engine->buffer, engine->count,
-                     *ctx->tick_num);
+  ccout_poll(ctx->ccout, ctx->now_us, engine);
+  send_engine_ccs(sink, engine);
   Oevent_list *list = ctx->tick_list;
   tick_run_vm(ctx->gbuffer, ctx->mbuffer, ctx->height, ctx->width,
               *ctx->tick_num, list, ctx->random_seed, ctx->opstate);
   ++*ctx->tick_num;
   if (list->count > 0)
-    tick_send_events(sink, ctx->susnotes, list->buffer, list->count,
-                     *ctx->tick_num);
+    tick_send_events(ctx, sink, list->buffer, list->count);
 }
 
 U64 tick_len_us(Usz bpm) {

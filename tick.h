@@ -1,14 +1,15 @@
 #pragma once
 #include "base.h"
+#include "ccout.h"
 #include "opstate.h"
 #include "vmio.h"
 
 // The tick path (architecture spine AD-12, AD-14). tick.c is shell code that
 // obeys the core include allow-list (AD-2): it reads no clock, does no I/O,
-// keeps no writable globals of its own and sends only through the sink below,
-// so the unit tests link it against libc alone. Until B3, though, tick_body
-// and the event send change sim.c's global glide table: the engine run
-// advances it, and each CCI the VM emits registers a glide in it.
+// keeps no writable globals and sends only through the sink below, so the
+// unit tests link it against libc alone. Every CC goes through the caller's
+// CC engine (ccout.h): the tick body polls it, and each CC or CCI the VM
+// emits is submitted to it.
 
 // The send sink, provided by the shell, which also sends its own single bytes
 // through it. u is the shell's context, passed back on every call.
@@ -66,8 +67,9 @@ void susnote_list_remove_by_chan_mask(Susnote_list *sl, Usz chan_mask,
                                       Usz *restrict end_removed);
 
 // One tick of the sequencer, as the internal tick deadline runs it. The
-// shell owns everything the pointers reach. Nothing in it is a time:
-// sustained notes age by one tick per tick body, under every clock source.
+// shell owns everything the pointers reach. Sustained notes age by one tick
+// per tick body, under every clock source; the times are only the CC
+// engine's (spine AD-13): its poll and every submit in the body use now_us.
 typedef struct {
   Glyph *gbuffer;
   Mark *mbuffer;
@@ -76,20 +78,27 @@ typedef struct {
   Opstate_store *opstate;   // the live store
   Usz *tick_num;            // incremented once per tick body
   Oevent_list *tick_list;   // the VM's events, then sent
-  Oevent_list *engine_list; // the glide engine's output: cleared, then sent
+  Oevent_list *engine_list; // the CC engine's output: cleared before each
+                            // poll or submit, then sent
   Susnote_list *susnotes;
+  Ccout_engine *ccout; // the CC engine
+  U64 now_us;          // the tick's time, read once by the shell, in us
+  U64 tick_len;        // one tick at the tempo, in us: glide lengths
 } Tick_ctx;
 
 // The tick body. Within a tick, the wire order is:
 //   1. F8, when beat clock is on: sent by the shell, before tick_body;
 //   2. every sustained note ages by one tick, and the note-offs of those
 //      that run out go out;
-//   3. the glide engine's output: the engine list is cleared, the engine
-//      runs into it, and its CCs go out;
+//   3. the CC engine's glide steps: the engine list is cleared, the engine
+//      is polled at now_us into it, and its CCs go out;
 //   then the VM runs into the tick list, ++*tick_num, and the tick list goes
-//   out, as the engine list did:
-//   4. CCs, pitch bends and OSC/UDP, at once, in list (VM) order; a CCI
-//      registers a glide instead, for step 3 of later ticks;
+//   out:
+//   4. CCs, pitch bends and OSC/UDP, at once, in list (VM) order. Each CC or
+//      CCI clears the engine list, is submitted to the engine at now_us, and
+//      the engine's output goes out at once: a CC, a CCI at rate 0 or z, and
+//      a CCI on a controller with no last value go out in this tick, and a
+//      glide's steps in step 3 of later ticks;
 //   5. the note-offs of retriggered notes (a new note on a sustained channel
 //      and note), then the note-ons;
 //   6. the mono round: the note-offs of every sustained note on a channel
@@ -98,8 +107,9 @@ typedef struct {
 void tick_body(Tick_ctx const *ctx, Tick_sink const *sink);
 
 // Clears the marks and the list, then runs the VM once into the list. Sends
-// nothing and ages nothing: the paused re-mark (the preview, on the scratch
-// grid and store) and step-forward use it as well as tick_body.
+// nothing, ages nothing and never touches the CC engine: the paused re-mark
+// (the preview, on the scratch grid and store) and step-forward use it as
+// well as tick_body.
 void tick_run_vm(Glyph *restrict gbuffer, Mark *restrict mbuffer, Usz height,
                  Usz width, Usz tick_num, Oevent_list *list, Usz random_seed,
                  Opstate_store *opstate);

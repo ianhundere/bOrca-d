@@ -1,21 +1,26 @@
-// Unit tests for tick.c (spec items B4 and B8, spine AD-12 to AD-14): the
-// tick body on a recording sink, the CAP-9 resume test, the wire order within
-// a tick, the glide engine's place in it, release-all, the note lengths in
-// tick bodies (B8), tick_run_vm and tick_len_us. Step numbers refer to the
-// wire order in tick.h.
-//
-// sim.c's glide table is global until B3, so a glide left active would leak
-// into later runs. Only tick_glide_engine_order uses a CCI, and it drains the
-// table before it returns; every other test checks after each tick body that
-// the engine sent nothing, so a leaked glide fails with a clear cause.
+// Unit tests for tick.c (spec items B4, B8 and B3, spine AD-12 to AD-14):
+// the tick body on a recording sink, the CAP-9 resume test, the wire order
+// within a tick, the CC engine's place in it, release-all, the note lengths
+// in tick bodies (B8), tick_run_vm and tick_len_us. Step numbers refer to the
+// wire order in tick.h. The CAP-9, wire-order and note tests run body b at
+// b x 125 000 us, one tick at 120 BPM, and the engine tests at 10 s +
+// b x tick_len; each run has its own CC engine on the stack.
+#include "../../ccout.h"
 #include "../../gbuffer.h"
 #include "../../opstate.h"
-#include "../../sim.h"
 #include "../../tick.h"
 #include "../../vmio.h"
 #include "tests.h"
 
 enum { Rec_capacity = 64 };
+
+static U64 const tick_us = 125000; // one tick at 120 BPM
+
+// The engine has no glide running.
+static bool engine_idle(Ccout_engine const *ccout) {
+  U64 t;
+  return !ccout_next_deadline(ccout, 0, &t) && ccout->active_count == 0;
+}
 
 typedef struct {
   int status, d1, d2;
@@ -127,7 +132,8 @@ static void cap9_patch(Glyph *grid) {
 
 // The CAP-9 sequence, as the TUI runs it around a pause:
 //   1. a tick body;
-//   2. release all (pause);
+//   2. pause, as ged_set_playing(false) does: release all, then cancel the
+//      CC engine's glides;
 //   3. the edit, if edit is set: a note operator under the fourth D;
 //   4. the preview, if preview is set: the VM on a scratch copy of the grid
 //      and the store, into the list that the next tick body gets as its
@@ -148,26 +154,33 @@ static void run_cap9(bool edit, bool preview, Recording *out,
   oevent_list_init(&engine_list);
   Susnote_list susnotes;
   susnote_list_init(&susnotes);
+  Ccout_engine ccout;
+  ccout_init(&ccout);
   Usz tick_num = 0;
-  Tick_ctx const ctx = {.gbuffer = grid,
-                        .mbuffer = marks,
-                        .height = H,
-                        .width = W,
-                        .random_seed = 0,
-                        .opstate = &store,
-                        .tick_num = &tick_num,
-                        .tick_list = &tick_list,
-                        .engine_list = &engine_list,
-                        .susnotes = &susnotes};
+  Tick_ctx ctx = {.gbuffer = grid,
+                  .mbuffer = marks,
+                  .height = H,
+                  .width = W,
+                  .random_seed = 0,
+                  .opstate = &store,
+                  .tick_num = &tick_num,
+                  .tick_list = &tick_list,
+                  .engine_list = &engine_list,
+                  .susnotes = &susnotes,
+                  .ccout = &ccout,
+                  .now_us = 0,
+                  .tick_len = tick_us};
 
-  // 1 and 2: the tick sends the note-on, and pausing releases it.
+  // 1 and 2: the tick sends the note-on, and pausing releases it and
+  // cancels the engine's glides (there are none here).
   Recording before;
   Tick_sink const before_sink = rec_sink(&before);
   tick_body(&ctx, &before_sink);
-  CHECK(engine_list.count == 0);
+  CHECK(engine_idle(&ccout));
   CHECK(tick_num == 1);
   CHECK(susnotes.count == 1);
   tick_release_all(&before_sink, &susnotes);
+  ccout_cancel(&ccout);
   CHECK(susnotes.count == 0);
   Triple const tick0[] = {
       {0xB0, 74, 64}, {0xE0, 127, 61}, {0x90, 36, 127}, {0x80, 36, 0}};
@@ -189,8 +202,9 @@ static void run_cap9(bool edit, bool preview, Recording *out,
 
   // 5. The first tick after resume.
   Tick_sink const sink = rec_sink(out);
+  ctx.now_us = tick_us;
   tick_body(&ctx, &sink);
-  CHECK(engine_list.count == 0); // cleared, and no glide to run
+  CHECK(engine_idle(&ccout)); // the list was cleared, and no glide runs
   CHECK(tick_num == 2);
 
   susnote_list_deinit(&susnotes);
@@ -243,7 +257,7 @@ void test_tick_cap9_resume_without_edit(void) {
 // the note-on, the mono channel's note-off, then the mono note-on. (Step 1,
 // the shell's F8 in ged_do_stuff, is covered by the manual check;
 // tick_note_length_beat_clock only models it in test code. Step 3 is covered
-// by tick_glide_engine_order.)
+// by tick_engine_poll_order.)
 void test_tick_wire_order(void) {
   enum { H = 3, W = 32 };
   Glyph grid[H * W];
@@ -276,6 +290,8 @@ void test_tick_wire_order(void) {
   Oevent_list tick_list, engine_list;
   oevent_list_init(&tick_list);
   oevent_list_init(&engine_list);
+  Ccout_engine ccout;
+  ccout_init(&ccout);
   Usz tick_num = 0;
   Tick_ctx const ctx = {.gbuffer = grid,
                         .mbuffer = marks,
@@ -286,11 +302,14 @@ void test_tick_wire_order(void) {
                         .tick_num = &tick_num,
                         .tick_list = &tick_list,
                         .engine_list = &engine_list,
-                        .susnotes = &susnotes};
+                        .susnotes = &susnotes,
+                        .ccout = &ccout,
+                        .now_us = 0,
+                        .tick_len = tick_us};
   Recording rec;
   Tick_sink const sink = rec_sink(&rec);
   tick_body(&ctx, &sink);
-  CHECK(engine_list.count == 0);
+  CHECK(engine_idle(&ccout));
 
   Triple const want[] = {
       {0x83, 60, 0},   // 2. the note-off that aged out
@@ -326,23 +345,45 @@ void test_tick_wire_order(void) {
   opstate_free(&store);
 }
 
-// Step 3, the glide engine: a CCI the VM emits on one tick registers a
-// glide, and the next tick body sends the engine's CC after the note-offs
-// that age out and before the VM's events. Rate z is a one-step glide: one
-// engine CC, at the target. The test then drains sim.c's global glide table,
-// so later tests start with it inactive.
-void test_tick_glide_engine_order(void) {
-  enum { H = 3, W = 24 };
-  Glyph grid[H * W];
-  Mark marks[H * W];
-  memset(grid, '.', sizeof grid);
-  put(grid, W, 0, 0, "D1");
-  put(grid, W, 2, 0, "!0.74gz"); // a glide to CC 74 = 64 on channel 0
-  put(grid, W, 0, 8, "D1");
-  put(grid, W, 2, 8, "!0.71g."); // an instant CC 71 = 64
-  put(grid, W, 0, 16, "D1");
-  put(grid, W, 2, 16, ":03C.1"); // note 36, one tick long
+// The grid of the engine tests: a CCI on CC 74 of channel 0, to 64, at
+// the rate glyph cci_rate, banged by the D above it (rate_d); an instant
+// CC 71 = 64; and note 36, one tick long. The last two are banged on every
+// tick.
+enum { Engine_h = 3, Engine_w = 24 };
 
+static void engine_grid(Glyph *grid, char const *rate_d, char cci_rate) {
+  char cci[] = "!0.74g.";
+  cci[6] = cci_rate;
+  memset(grid, '.', (Usz)Engine_h * Engine_w);
+  put(grid, Engine_w, 0, 0, rate_d);
+  put(grid, Engine_w, 2, 0, cci);
+  put(grid, Engine_w, 0, 8, "D1");
+  put(grid, Engine_w, 2, 8, "!0.71g."); // an instant CC 71 = 64
+  put(grid, Engine_w, 0, 16, "D1");
+  put(grid, Engine_w, 2, 16, ":03C.1"); // note 36, one tick long
+}
+
+// The engine tests' time base: body b runs at 10 s + b * tick_len, so a
+// glide submit stamped with 0, or with another body's time, shows in the
+// steps. An instant's time shows only in the engine's last_emit, which
+// tick_engine_cc_path checks.
+static U64 const engine_t0 = 10000000;
+
+// An edit to the grid before one tick body: the text of the D at (0, 0)
+// and of the operator under it at (2, 0). NULL leaves a cell as it is.
+typedef struct {
+  char const *d, *op;
+} Edit;
+
+// Runs `bodies` tick bodies of grid from tick 0, body b at engine_t0 +
+// b * tick_len with that tick_len, on ccout, recording body b into recs[b].
+// edits, if not NULL, holds one edit per body, made before it. After each
+// body, the engine must be idle or not, as want_idle[b] says, if want_idle
+// is not NULL.
+static void run_engine_bodies(Glyph *grid, Ccout_engine *ccout, Usz bodies,
+                              U64 tick_len, Edit const *edits,
+                              bool const *want_idle, Recording *recs) {
+  Mark marks[Engine_h * Engine_w];
   Opstate_store store;
   opstate_init(&store);
   Oevent_list tick_list, engine_list;
@@ -351,58 +392,175 @@ void test_tick_glide_engine_order(void) {
   Susnote_list susnotes;
   susnote_list_init(&susnotes);
   Usz tick_num = 0;
-  Tick_ctx const ctx = {.gbuffer = grid,
-                        .mbuffer = marks,
-                        .height = H,
-                        .width = W,
-                        .random_seed = 0,
-                        .opstate = &store,
-                        .tick_num = &tick_num,
-                        .tick_list = &tick_list,
-                        .engine_list = &engine_list,
-                        .susnotes = &susnotes};
-
-  // The first tick registers the glide; the engine has nothing to run yet.
-  Recording first;
-  Tick_sink const first_sink = rec_sink(&first);
-  tick_body(&ctx, &first_sink);
-  CHECK(engine_list.count == 0);
-  Triple const want_first[] = {{0xB0, 71, 64}, {0x90, 36, 127}};
-  CHECK(triples_are(&first, want_first, ORCA_ARRAY_COUNTOF(want_first)));
-
-  // The second tick runs it.
-  Recording second;
-  Tick_sink const second_sink = rec_sink(&second);
-  tick_body(&ctx, &second_sink);
-  CHECK(engine_list.count == 1);
-  Triple const want_second[] = {
-      {0x80, 36, 0},   // 2. the note-off that aged out
-      {0xB0, 74, 64},  // 3. the engine's CC
-      {0xB0, 71, 64},  // 4. the VM's CC
-      {0x90, 36, 127}, // 5. the VM's note-on
-  };
-  CHECK(triples_are(&second, want_second, ORCA_ARRAY_COUNTOF(want_second)));
-  CHECK(second.midi1_count == 0 && second.osc_count == 0);
-
-  // The second tick's CCI registered the glide again: run the engine until
-  // it emits nothing, so the global table is left inactive. The engine
-  // advances one step per call and ignores its time argument, as in
-  // tick_body.
-  Oevent_list drain;
-  oevent_list_init(&drain);
-  Usz rounds = 0;
-  do {
-    oevent_list_clear(&drain);
-    advance_midi_cc_interpolations(0.0, &drain);
-    ++rounds;
-  } while (drain.count > 0 && rounds < 64);
-  CHECK(drain.count == 0);
-
-  oevent_list_deinit(&drain);
+  Tick_ctx ctx = {.gbuffer = grid,
+                  .mbuffer = marks,
+                  .height = Engine_h,
+                  .width = Engine_w,
+                  .random_seed = 0,
+                  .opstate = &store,
+                  .tick_num = &tick_num,
+                  .tick_list = &tick_list,
+                  .engine_list = &engine_list,
+                  .susnotes = &susnotes,
+                  .ccout = ccout,
+                  .now_us = 0,
+                  .tick_len = tick_len};
+  for (Usz body = 0; body < bodies; ++body) {
+    if (edits != NULL && edits[body].d != NULL)
+      put(grid, Engine_w, 0, 0, edits[body].d);
+    if (edits != NULL && edits[body].op != NULL)
+      put(grid, Engine_w, 2, 0, edits[body].op);
+    Tick_sink const sink = rec_sink(&recs[body]);
+    ctx.now_us = engine_t0 + body * tick_len;
+    tick_body(&ctx, &sink);
+    if (want_idle != NULL)
+      CHECK(engine_idle(ccout) == want_idle[body]);
+    CHECK(recs[body].midi1_count == 0 && recs[body].osc_count == 0);
+  }
   susnote_list_deinit(&susnotes);
   oevent_list_deinit(&tick_list);
   oevent_list_deinit(&engine_list);
   opstate_free(&store);
+}
+
+// Matrix row "0/z CCI (tick)": a CCI at rate z or 0 is instant. Banged on
+// every tick, each bang's CC goes out in the tick that bangs it, at step 4 in
+// VM order, before the instant CC that follows it in the grid (4f349cd sent
+// it in the next tick, at step 3). Like any instant, it goes out again on
+// every bang, though the value is the same.
+static void run_cci_same_tick(char cci_rate) {
+  Glyph grid[Engine_h * Engine_w];
+  engine_grid(grid, "D1", cci_rate);
+  Ccout_engine ccout;
+  ccout_init(&ccout);
+  Recording recs[2];
+  bool const want_idle[2] = {true, true};
+  run_engine_bodies(grid, &ccout, 2, tick_us, NULL, want_idle, recs);
+  Triple const want_first[] = {
+      {0xB0, 74, 64}, {0xB0, 71, 64}, {0x90, 36, 127}};
+  CHECK(triples_are(&recs[0], want_first, ORCA_ARRAY_COUNTOF(want_first)));
+  Triple const want_second[] = {
+      {0x80, 36, 0},   // 2. the note-off that aged out
+      {0xB0, 74, 64},  // 4. the CCI's CC,
+      {0xB0, 71, 64},  //    then the instant CC, in VM order
+      {0x90, 36, 127}, // 5. the note-on
+  };
+  CHECK(triples_are(&recs[1], want_second, ORCA_ARRAY_COUNTOF(want_second)));
+}
+
+void test_tick_cci_same_tick(void) {
+  run_cci_same_tick('z');
+  run_cci_same_tick('0');
+}
+
+// Matrix row "Poll order (tick)": step 3. The engine knows that CC 74 is 0
+// (an instant before the first body); Dz bangs a glide to 64 at rate w (4
+// ticks) in body 0 only. Each later body sends the glide's step after the
+// note-off that ages out and before the VM's events, and the glide ends at
+// its target in body 4.
+void test_tick_engine_poll_order(void) {
+  Glyph grid[Engine_h * Engine_w];
+  engine_grid(grid, "Dz", 'w');
+  Ccout_engine ccout;
+  ccout_init(&ccout);
+  Oevent_list seed;
+  oevent_list_init(&seed);
+  ccout_submit_instant(&ccout, 0, 74, 0, 0, &seed);
+  CHECK(seed.count == 1);
+  oevent_list_deinit(&seed);
+  enum { Bodies = 6 };
+  Recording recs[Bodies];
+  bool const want_idle[Bodies] = {false, false, false, false, true, true};
+  run_engine_bodies(grid, &ccout, Bodies, tick_us, NULL, want_idle, recs);
+  // Body 0 submits the glide, which sends nothing yet.
+  Triple const want_first[] = {{0xB0, 71, 64}, {0x90, 36, 127}};
+  CHECK(triples_are(&recs[0], want_first, ORCA_ARRAY_COUNTOF(want_first)));
+  int const steps[Bodies] = {-1, 16, 32, 48, 64, -1};
+  for (Usz body = 1; body < Bodies; ++body) {
+    Triple const with_step[] = {
+        {0x80, 36, 0},           // 2. the note-off that aged out
+        {0xB0, 74, steps[body]}, // 3. the engine's step
+        {0xB0, 71, 64},          // 4. the VM's CC
+        {0x90, 36, 127},         // 5. the VM's note-on
+    };
+    Triple const without_step[] = {
+        {0x80, 36, 0}, {0xB0, 71, 64}, {0x90, 36, 127}};
+    if (steps[body] >= 0)
+      CHECK(triples_are(&recs[body], with_step,
+                        ORCA_ARRAY_COUNTOF(with_step)));
+    else
+      CHECK(triples_are(&recs[body], without_step,
+                        ORCA_ARRAY_COUNTOF(without_step)));
+  }
+}
+
+// Runs the edits on a grid holding only the D at (0, 0) and the operator
+// under it, from a fresh engine, and checks that each body sent exactly the
+// CC 74 values in want[b] (-1 ends a body's list). D1 bangs every tick; Dz,
+// from body 1 on, never bangs within these bodies.
+enum { Path_bodies = 8, Path_values = 3 };
+
+static void run_cc_path(U64 tick_len, Edit const *edits,
+                        int const want[Path_bodies][Path_values]) {
+  Glyph grid[Engine_h * Engine_w];
+  memset(grid, '.', sizeof grid);
+  Ccout_engine ccout;
+  ccout_init(&ccout);
+  Recording recs[Path_bodies];
+  run_engine_bodies(grid, &ccout, Path_bodies, tick_len, edits, NULL, recs);
+  for (Usz body = 0; body < Path_bodies; ++body) {
+    Triple expect[Path_values];
+    Usz n = 0;
+    for (; n < Path_values && want[body][n] >= 0; ++n)
+      expect[n] = (Triple){0xB0, 74, want[body][n]};
+    CHECK(triples_are(&recs[body], expect, n));
+  }
+}
+
+// The tick path sends every CC through the engine, with the body's time and
+// tick_len. A VM instant `!0.740.` in body 0 tells the engine that CC 74 is
+// 0, so a glide to 64 at w banged in body 1 steps 16, 32, 48, 64 at step 3
+// of bodies 2 to 5; a CC sent around the engine would leave the value
+// unknown, and the glide would jump to 64 at once. At 100 000 us a tick the
+// steps are the same, as the glide's length follows tick_len; a glide timed
+// with another tick length, or stamped with another time, sends other
+// values. An instant `!0.74a.` (40) banged mid-glide stops the steps. A
+// glide re-banged by D1 on every tick runs undisturbed: 16, 32, 48, 64,
+// then nothing. And a VM instant goes to the engine stamped with its body's
+// time.
+void test_tick_engine_cc_path(void) {
+  Edit const banged_once[Path_bodies] = {
+      {"D1", "!0.740."}, {"D1", "!0.74gw"}, {"Dz", NULL}};
+  int const want_once[Path_bodies][Path_values] = {
+      {0, -1}, {-1}, {16, -1}, {32, -1}, {48, -1}, {64, -1}, {-1}, {-1}};
+  run_cc_path(tick_us, banged_once, want_once);
+  run_cc_path(100000, banged_once, want_once);
+
+  Edit const instant_mid_glide[Path_bodies] = {
+      {"D1", "!0.740."}, {"D1", "!0.74gw"}, {"Dz", NULL},
+      {"D1", "!0.74a."}, {"Dz", NULL}};
+  int const want_stopped[Path_bodies][Path_values] = {
+      {0, -1}, {-1}, {16, -1}, {32, 40, -1}, {-1}, {-1}, {-1}, {-1}};
+  run_cc_path(tick_us, instant_mid_glide, want_stopped);
+
+  Edit const rebanged[Path_bodies] = {{"D1", "!0.740."}, {"D1", "!0.74gw"}};
+  int const want_rebanged[Path_bodies][Path_values] = {
+      {0, -1}, {-1}, {16, -1}, {32, -1}, {48, -1}, {64, -1}, {-1}, {-1}};
+  run_cc_path(tick_us, rebanged, want_rebanged);
+
+  // A VM instant is submitted with its body's time: banged in body 1, its
+  // emission time is body 1's now_us.
+  Glyph grid[Engine_h * Engine_w];
+  memset(grid, '.', sizeof grid);
+  Ccout_engine ccout;
+  ccout_init(&ccout);
+  Edit const instant_late[2] = {{NULL, NULL}, {"D1", "!0.740."}};
+  Recording recs[2];
+  run_engine_bodies(grid, &ccout, 2, tick_us, instant_late, NULL, recs);
+  Triple const want_instant[] = {{0xB0, 74, 0}};
+  CHECK(recs[0].midi3_count == 0);
+  CHECK(triples_are(&recs[1], want_instant, 1));
+  CHECK(ccout.last_emit[0 * Ccout_controls + 74] == engine_t0 + tick_us);
 }
 
 // Release-all (pause, quit, an output change) sends a note-off for every
@@ -461,21 +619,27 @@ static void run_note_bodies(Glyph *grid, Usz start, Usz bodies,
   oevent_list_init(&engine_list);
   Susnote_list susnotes;
   susnote_list_init(&susnotes);
+  Ccout_engine ccout;
+  ccout_init(&ccout);
   Usz tick_num = start;
-  Tick_ctx const ctx = {.gbuffer = grid,
-                        .mbuffer = marks,
-                        .height = Note_h,
-                        .width = Note_w,
-                        .random_seed = 0,
-                        .opstate = &store,
-                        .tick_num = &tick_num,
-                        .tick_list = &tick_list,
-                        .engine_list = &engine_list,
-                        .susnotes = &susnotes};
+  Tick_ctx ctx = {.gbuffer = grid,
+                  .mbuffer = marks,
+                  .height = Note_h,
+                  .width = Note_w,
+                  .random_seed = 0,
+                  .opstate = &store,
+                  .tick_num = &tick_num,
+                  .tick_list = &tick_list,
+                  .engine_list = &engine_list,
+                  .susnotes = &susnotes,
+                  .ccout = &ccout,
+                  .now_us = 0,
+                  .tick_len = tick_us};
   Tick_sink const sink = rec_sink(rec);
   U8 bclock_sixths = 0; // as Ged.midi_bclock_sixths, 0 when play starts
   for (Usz body = 0; body < bodies; ++body) {
     rec->body = body;
+    ctx.now_us = body * tick_us;
     if (!beat_clock) {
       tick_body(&ctx, &sink);
     } else {
@@ -487,7 +651,7 @@ static void run_note_bodies(Glyph *grid, Usz start, Usz bodies,
           tick_body(&ctx, &sink);
       }
     }
-    CHECK(engine_list.count == 0);
+    CHECK(engine_idle(&ccout));
   }
   CHECK(tick_num == start + bodies);
   susnote_list_deinit(&susnotes);
@@ -665,20 +829,26 @@ void test_tick_note_empty_list(void) {
   Oevent_list tick_list, engine_list;
   oevent_list_init(&tick_list);
   oevent_list_init(&engine_list);
+  Ccout_engine ccout;
+  ccout_init(&ccout);
   Usz tick_num = 0;
-  Tick_ctx const ctx = {.gbuffer = grid,
-                        .mbuffer = marks,
-                        .height = H,
-                        .width = W,
-                        .random_seed = 0,
-                        .opstate = &store,
-                        .tick_num = &tick_num,
-                        .tick_list = &tick_list,
-                        .engine_list = &engine_list,
-                        .susnotes = &susnotes};
+  Tick_ctx ctx = {.gbuffer = grid,
+                  .mbuffer = marks,
+                  .height = H,
+                  .width = W,
+                  .random_seed = 0,
+                  .opstate = &store,
+                  .tick_num = &tick_num,
+                  .tick_list = &tick_list,
+                  .engine_list = &engine_list,
+                  .susnotes = &susnotes,
+                  .ccout = &ccout,
+                  .now_us = 0,
+                  .tick_len = tick_us};
   tick_body(&ctx, &sink);
+  ctx.now_us = tick_us;
   tick_body(&ctx, &sink);
-  CHECK(engine_list.count == 0);
+  CHECK(engine_idle(&ccout));
   Triple const want[] = {{0xB0, 74, 64}, {0xB0, 74, 64}};
   CHECK(triples_are(&rec, want, ORCA_ARRAY_COUNTOF(want)));
   CHECK(susnotes.buffer == NULL && susnotes.count == 0);
