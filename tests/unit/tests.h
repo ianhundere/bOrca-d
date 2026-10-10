@@ -65,7 +65,16 @@
   X(tick_note_mono)                                                            \
   X(tick_note_empty_list)                                                      \
   X(tick_run_vm_clears_list)                                                   \
-  X(tick_len_us)
+  X(tick_len_us)                                                               \
+  X(music_scale_selectors)                                                     \
+  X(music_midichord_selectors)                                                 \
+  X(music_scale_inversion)                                                     \
+  X(music_midichord_inversion)                                                 \
+  X(music_inversion_sorts_12)                                                  \
+  X(music_other_glyphs)                                                        \
+  X(music_octave_overflow)                                                     \
+  X(music_names)                                                               \
+  X(music_shared_intervals)
 
 // The full list for each adapter FEAT_ flag, and for the runner's failure
 // canary, whatever the flags.

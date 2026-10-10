@@ -1,5 +1,6 @@
 #include "sim.h"
 #include "gbuffer.h"
+#include "music.h"
 #include <string.h>
 
 // Note Sequence
@@ -704,130 +705,11 @@ BEGIN_OPERATOR(lerp)
   POKE(1, 0, glyph_with_case(glyph_of((Usz)(val + mod)), b));
 END_OPERATOR
 
-// BOORCH's new Scale OP - Unified Scale/Chord System
-
-// SCALES (0-9) - Essential scales only
-static Usz const scale_major[] = {0, 2, 4, 5, 7, 9, 11};         // 0: Major
-static Usz const scale_minor[] = {0, 2, 3, 5, 7, 8, 10};         // 1: Minor
-static Usz const scale_dorian[] = {0, 2, 3, 5, 7, 9, 10};        // 2: Dorian
-static Usz const scale_lydian[] = {0, 2, 4, 6, 7, 9, 11};        // 3: Lydian
-static Usz const scale_mixolydian[] = {0, 2, 4, 5, 7, 9, 10};    // 4: Mixolydian
-static Usz const scale_pentatonic[] = {0, 2, 4, 7, 9};           // 5: Pentatonic
-static Usz const scale_hirajoshi[] = {0, 2, 3, 7, 8};            // 6: Hirajoshi
-static Usz const scale_iwato[] = {0, 1, 5, 6, 10};               // 7: Iwato
-static Usz const scale_tetratonic[] = {0, 4, 7, 11};             // 8: Tetratonic
-static Usz const scale_fifths[] = {0, 7};                        // 9: Fifths
-
-// ENRICHED CHORDS FOR MIDICHORD 0-9 (Approach 2: Enriched versions of a-j)
-static Usz const chord_major_rich[] = {0, 4, 7, 12};             // 0: Major + octave root (C-E-G-C)
-static Usz const chord_minor_rich[] = {0, 3, 7, 12};             // 1: Minor + octave root (C-Eb-G-C)
-static Usz const chord_sus4_rich[] = {0, 5, 7, 12};              // 2: Sus4 + octave root (C-F-G-C)
-static Usz const chord_sus2_rich[] = {0, 2, 7, 12};              // 3: Sus2 + octave root (C-D-G-C)
-static Usz const chord_major7_rich[] = {0, 4, 7, 11, 16};        // 4: Major7 + octave 3rd (C-E-G-B-E)
-static Usz const chord_minor7_rich[] = {0, 3, 7, 10, 15};        // 5: Minor7 + octave 3rd (C-Eb-G-Bb-Eb)
-static Usz const chord_dom7_rich[] = {0, 4, 7, 10, 19};          // 6: Dom7 + octave 5th (C-E-G-Bb-G)
-static Usz const chord_major6_rich[] = {0, 4, 7, 9, 12};         // 7: Major6 + octave root (C-E-G-A-C)
-static Usz const chord_minor6_rich[] = {0, 3, 7, 9, 12};         // 8: Minor6 + octave root (C-Eb-G-A-C)
-static Usz const chord_dim_rich[] = {0, 3, 6, 12};               // 9: Dim + octave root (C-Eb-Gb-C)
-
-// Separate scale arrays for Scale operator (0-9)
-static Usz const *const scales[] = {
-    scale_major, scale_minor, scale_dorian, scale_lydian, scale_mixolydian,
-    scale_pentatonic, scale_hirajoshi, scale_iwato, scale_tetratonic, scale_fifths
-};
-
-static Usz const scale_lengths[] = {7, 7, 7, 7, 7, 5, 5, 5, 4, 2};
-
-// CHORDS ROOT POSITION (a-z) - 26 most common chords
-static Usz const chord_major[] = {0, 4, 7};                      // a: Major
-static Usz const chord_minor[] = {0, 3, 7};                      // b: Minor
-static Usz const chord_sus4[] = {0, 5, 7};                       // c: Sus4
-static Usz const chord_sus2[] = {0, 2, 7};                       // d: Sus2
-static Usz const chord_major7[] = {0, 4, 7, 11};                 // e: Major 7
-static Usz const chord_minor7[] = {0, 3, 7, 10};                 // f: Minor 7
-static Usz const chord_dom7[] = {0, 4, 7, 10};                   // g: Dominant 7
-static Usz const chord_min_maj7[] = {0, 3, 7, 11};               // h: Minor Major 7
-static Usz const chord_minor6[] = {0, 3, 7, 9};                  // i: Minor 6
-static Usz const chord_major6[] = {0, 4, 7, 9};                  // j: Major 6
-static Usz const chord_major9[] = {0, 4, 7, 11, 14};             // k: Major 9
-static Usz const chord_minor9[] = {0, 3, 7, 10, 14};             // l: Minor 9
-static Usz const chord_major_add9[] = {0, 4, 7, 14};             // m: Major add9
-static Usz const chord_minor_add9[] = {0, 3, 7, 14};             // n: Minor add9
-static Usz const chord_dim[] = {0, 3, 6};                        // o: Diminished
-static Usz const chord_half_dim[] = {0, 3, 6, 10};               // p: Half Diminished
-static Usz const chord_dim7[] = {0, 3, 6, 9};                    // q: Diminished 7
-static Usz const chord_aug[] = {0, 4, 8};                        // r: Augmented
-static Usz const chord_aug7[] = {0, 4, 8, 10};                   // s: Augmented 7
-static Usz const chord_dom9[] = {0, 4, 7, 10, 14};               // t: Dominant 9
-static Usz const chord_dom7b9[] = {0, 4, 7, 10, 13};             // u: Dominant 7b9
-static Usz const chord_dom7sharp9[] = {0, 4, 7, 10, 15};         // v: Dominant 7#9
-static Usz const chord_maj_6_9[] = {0, 4, 7, 9, 14};             // w: Major 6/9
-static Usz const chord_min_6_9[] = {0, 3, 7, 9, 14};             // x: Minor 6/9
-static Usz const chord_min11[] = {0, 3, 7, 10, 17};              // y: Minor 11
-static Usz const chord_min7b5[] = {0, 3, 6, 10};                 // z: Minor 7b5 (alt. half-dim)
-
-// CHORDS FIRST INVERSION (A-Z) - Same chords but inverted
-static Usz const chord_major_inv[] = {0, 3, 8};                  // A: Major 1st inv
-static Usz const chord_minor_inv[] = {0, 4, 9};                  // B: Minor 1st inv  
-static Usz const chord_sus4_inv[] = {0, 2, 7};                   // C: Sus4 1st inv
-static Usz const chord_sus2_inv[] = {0, 5, 10};                  // D: Sus2 1st inv
-static Usz const chord_major7_inv[] = {0, 3, 7, 8};              // E: Major 7 1st inv
-static Usz const chord_minor7_inv[] = {0, 4, 7, 9};              // F: Minor 7 1st inv
-static Usz const chord_dom7_inv[] = {0, 3, 6, 8};                // G: Dominant 7 1st inv
-static Usz const chord_min_maj7_inv[] = {0, 4, 8, 9};            // H: Minor Major 7 1st inv
-static Usz const chord_minor6_inv[] = {0, 4, 6, 9};              // I: Minor 6 1st inv
-static Usz const chord_major6_inv[] = {0, 3, 5, 8};              // J: Major 6 1st inv
-static Usz const chord_major9_inv[] = {0, 3, 7, 10, 11};         // K: Major 9 1st inv
-static Usz const chord_minor9_inv[] = {0, 4, 7, 11, 12};         // L: Minor 9 1st inv
-static Usz const chord_major_add9_inv[] = {0, 3, 10, 11};        // M: Major add9 1st inv
-static Usz const chord_minor_add9_inv[] = {0, 4, 11, 12};        // N: Minor add9 1st inv
-static Usz const chord_dim_inv[] = {0, 3, 9};                    // O: Diminished 1st inv
-static Usz const chord_half_dim_inv[] = {0, 3, 7, 9};            // P: Half Diminished 1st inv
-static Usz const chord_dim7_inv[] = {0, 3, 6, 9};                // Q: Diminished 7 1st inv
-static Usz const chord_aug_inv[] = {0, 4, 8};                    // R: Augmented 1st inv (same as root)
-static Usz const chord_aug7_inv[] = {0, 4, 6, 8};                // S: Augmented 7 1st inv
-static Usz const chord_dom9_inv[] = {0, 3, 6, 10, 11};           // T: Dominant 9 1st inv
-static Usz const chord_dom7b9_inv[] = {0, 3, 6, 9, 11};          // U: Dominant 7b9 1st inv
-static Usz const chord_dom7sharp9_inv[] = {0, 3, 6, 11, 12};     // V: Dominant 7#9 1st inv
-static Usz const chord_maj_6_9_inv[] = {0, 3, 5, 10, 11};        // W: Major 6/9 1st inv
-static Usz const chord_min_6_9_inv[] = {0, 4, 6, 11, 12};        // X: Minor 6/9 1st inv
-static Usz const chord_min11_inv[] = {0, 4, 7, 14, 15};          // Y: Minor 11 1st inv
-static Usz const chord_min7b5_inv[] = {0, 3, 7, 9};              // Z: Minor 7b5 1st inv
-
-// Unified array of all scales and chords (0-9, a-z, A-Z)
-static Usz const *const scales_and_chords[] = {
-    // Enriched chords for Midichord (0-9)
-    chord_major_rich, chord_minor_rich, chord_sus4_rich, chord_sus2_rich, chord_major7_rich,
-    chord_minor7_rich, chord_dom7_rich, chord_major6_rich, chord_minor6_rich, chord_dim_rich,
-    // Chords root position (a-z)
-    chord_major, chord_minor, chord_sus4, chord_sus2, chord_major7, chord_minor7,
-    chord_dom7, chord_min_maj7, chord_minor6, chord_major6, chord_major9, chord_minor9,
-    chord_major_add9, chord_minor_add9, chord_dim, chord_half_dim, chord_dim7, chord_aug,
-    chord_aug7, chord_dom9, chord_dom7b9, chord_dom7sharp9, chord_maj_6_9, chord_min_6_9,
-    chord_min11, chord_min7b5,
-    // Chords first inversion (A-Z)
-    chord_major_inv, chord_minor_inv, chord_sus4_inv, chord_sus2_inv, chord_major7_inv, 
-    chord_minor7_inv, chord_dom7_inv, chord_min_maj7_inv, chord_minor6_inv, chord_major6_inv,
-    chord_major9_inv, chord_minor9_inv, chord_major_add9_inv, chord_minor_add9_inv, chord_dim_inv,
-    chord_half_dim_inv, chord_dim7_inv, chord_aug_inv, chord_aug7_inv, chord_dom9_inv,
-    chord_dom7b9_inv, chord_dom7sharp9_inv, chord_maj_6_9_inv, chord_min_6_9_inv, chord_min11_inv,
-    chord_min7b5_inv
-};
-
-// Lengths for scales and chords
-static Usz const scale_chord_lengths[] = {
-    // Enriched chords for Midichord (0-9)
-    4, 4, 4, 4, 5, 5, 5, 5, 5, 4,
-    // Chords root position (a-z) 
-    3, 3, 3, 3, 4, 4, 4, 4, 4, 4, 5, 5, 4, 4, 3, 4, 4, 3, 4, 5, 5, 5, 5, 5, 5, 4,
-    // Chords first inversion (A-Z)
-    3, 3, 3, 3, 4, 4, 4, 4, 4, 4, 5, 5, 4, 4, 3, 4, 4, 3, 4, 5, 5, 5, 5, 5, 5, 4
-};
-
+// BOORCH's Scale operator. Its scales and chords come from music.h.
 BEGIN_OPERATOR(scale)
   PORT(0, 1, IN | PARAM, "Octave");   // Octave input
   PORT(0, 2, IN | PARAM, "Root");   // Root note (like C, c, D etc)
-  PORT(0, 3, IN | PARAM, "Scale");   // Scale/Chord (0-9 scales, a-z chords, A-Z first inversions)
+  PORT(0, 3, IN | PARAM, "Scale");   // Selector: 0-9 scales, a-z chords, A-Z first inversions
   PORT(0, 4, IN | PARAM, "Degree");   // Degree
   PORT(1, -1, OUT, ""); // Octave output
   PORT(1, 0, OUT, "");  // Note output
@@ -862,77 +744,41 @@ BEGIN_OPERATOR(scale)
       base_octave = 9;
   }
 
-  // Get scale/chord index - supports 0-9, a-z, A-Z (total 62 options)
-  Usz scale_index = index_of(scale_glyph);
+  // The selector's intervals, decoded from its raw glyph (music.h): 0-9
+  // scales, a-z chords in root position, A-Z their first inversions, and
+  // scale 0 for any other glyph.
+  Music_intervals intervals;
+  music_decode(Music_op_scale, scale_glyph, &intervals);
+
+  // Degrees past the last interval carry into the next octave.
   Usz degree_index = index_of(degree_glyph);
+  Usz scale_length = intervals.count;
+  Usz octave_increment = degree_index / scale_length;
+  degree_index = degree_index % scale_length;
+  Usz scale_offset = intervals.semitones[degree_index];
 
-  Usz scale_length, scale_offset;
-  
-  if (scale_index <= 9) {
-    // Use scales for 0-9
-    if (scale_index >= sizeof(scales) / sizeof(scales[0]))
-      return;
-    scale_length = scale_lengths[scale_index];
-    Usz octave_increment = degree_index / scale_length;
-    degree_index = degree_index % scale_length;
-    scale_offset = scales[scale_index][degree_index];
-    
-    // Calculate total semitones including octave increment
-    Usz total_semitones = root_note_num + scale_offset + (octave_increment * 12);
+  // Calculate total semitones including octave increment
+  Usz total_semitones = root_note_num + scale_offset + (octave_increment * 12);
 
-    // Calculate final note and octave
-    Usz final_note = total_semitones % 12;
-    Usz octave_offset = total_semitones / 12;
-    Usz final_octave = base_octave + octave_offset;
+  // Calculate final note and octave
+  Usz final_note = total_semitones % 12;
+  Usz octave_offset = total_semitones / 12;
+  Usz final_octave = base_octave + octave_offset;
 
-    if (final_octave > 9)
-      return;
+  if (final_octave > 9)
+    return;
 
-    // Output note
-    Glyph output_note_glyph = note_sequence[final_note];
-    POKE(1, 0, output_note_glyph);
+  // Output note
+  Glyph output_note_glyph = note_sequence[final_note];
+  POKE(1, 0, output_note_glyph);
 
-    // Output octave if input octave was provided
-    if (octave_g != '.') {
-      POKE(1, -1, glyph_of(final_octave));
-    }
-  } else {
-    // Use unified array for a-z, A-Z (indices 10-61)
-    Usz num_scales_chords = sizeof(scales_and_chords) / sizeof(scales_and_chords[0]);
-    if (scale_index >= num_scales_chords)
-      return;
-
-    // Get scale/chord length and calculate octave increment
-    scale_length = scale_chord_lengths[scale_index];
-    Usz octave_increment = degree_index / scale_length;
-
-    // Calculate scale degree within current octave
-    degree_index = degree_index % scale_length;
-    scale_offset = scales_and_chords[scale_index][degree_index];
-
-    // Calculate total semitones
-    Usz total_semitones = root_note_num + scale_offset + (octave_increment * 12);
-
-    // Calculate final note and octave
-    Usz final_note = total_semitones % 12;
-    Usz octave_offset = total_semitones / 12;
-    Usz final_octave = base_octave + octave_offset;
-
-    if (final_octave > 9)
-      return;
-
-    // Output note
-    Glyph output_note_glyph = note_sequence[final_note];
-    POKE(1, 0, output_note_glyph);
-
-    // Output octave if input octave was provided
-    if (octave_g != '.') {
-      POKE(1, -1, glyph_of(final_octave));
-    }
+  // Output octave if input octave was provided
+  if (octave_g != '.') {
+    POKE(1, -1, glyph_of(final_octave));
   }
 END_OPERATOR
 
-//BOORCH's MIDIChord operator (using unified scales_and_chords system)
+// BOORCH's MIDIChord operator. Its chords come from music.h.
 BEGIN_OPERATOR(midichord)
   // Check all required input ports
   PORT(0, 1, IN | PARAM, "Channel");
@@ -943,30 +789,6 @@ BEGIN_OPERATOR(midichord)
   PORT(0, 6, IN | PARAM, "Length");
   PORT(0, 0, OUT, ""); // Mark output immediately
   STOP_IF_NOT_BANGED;
-
-  // Get chord type and validate range (supports a-z and A-Z)
-  Glyph chord_glyph = PEEK(0, 4);
-  Usz chord_idx = index_of(chord_glyph);
-  
-  // Map chord input to unified scales_and_chords array
-  // 0-9: enriched chords for Midichord
-  // a-z (lowercase): indices 10-35 (root position chords)
-  // A-Z (uppercase): indices 36-61 (first inversion chords)
-  if (chord_idx <= 9) {
-    // 0-9: enriched chords (use as-is, already correct index)
-  } else if (chord_idx >= 10 && chord_idx <= 35) {
-    // Lowercase a-z: use as-is (already correct index for scales_and_chords)
-  } else if (chord_idx >= 36 && chord_idx <= 61) {
-    // Uppercase A-Z: use as-is (already correct index for scales_and_chords)
-  } else {
-    // Invalid chord type
-    return;
-  }
-
-  // Validate against total array size
-  Usz num_scales_chords = sizeof(scales_and_chords) / sizeof(scales_and_chords[0]);
-  if (chord_idx >= num_scales_chords)
-    return;
 
   // Get base note information with local scope
   Usz channel = index_of(PEEK(0, 1));
@@ -993,17 +815,20 @@ BEGIN_OPERATOR(midichord)
   if (root_note == UINT8_MAX)
     return;
 
-  // Get pointer to the selected chord array and its length
-  Usz const *chord = scales_and_chords[chord_idx];
-  Usz chord_len = scale_chord_lengths[chord_idx];
+  // The chord's intervals, decoded from the selector's raw glyph (music.h):
+  // 0-9 enriched chords, a-z chords in root position, A-Z their first
+  // inversions, and enriched chord 0 for any other glyph.
+  Music_intervals chord;
+  music_decode(Music_op_midichord, PEEK(0, 4), &chord);
 
   // Track highest note played so far
   int last_note_absolute = (current_octave * 12) + root_note - 1;
 
   // Create and output midi events for each note in the chord
-  for (Usz i = 0; i < chord_len; i++) {
+  for (Usz i = 0; i < chord.count; i++) {
     // Calculate this note's absolute MIDI note number
-    int note_absolute = (current_octave * 12) + root_note + (int)chord[i];
+    int note_absolute =
+        (current_octave * 12) + root_note + (int)chord.semitones[i];
 
     // If this note would be lower than previous note, move it up an octave
     while (note_absolute <= last_note_absolute) {

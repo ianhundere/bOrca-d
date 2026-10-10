@@ -67,13 +67,15 @@ then part of the review.
    that two items change is split so that each case waits for one.
 4. Run the suite: the case must report XFAIL, not FAIL.
 
-The marked repros today are `scale_inv` (`$3CA2`, `$3CA0`) and
-`midichord_inv` (`=13CA.1`), which wait for B2, and `midichord_vel`
-(`=13Caf1`, `=13C0f1`, `=13Ca01`), which waits for B5. `midichord_inv` uses
-velocity `.` so that B5 cannot change it; CAP-7's literal `=13CAf1`, which
-both items change, belongs to B2's story. When these fixed goldens were
-written, a throwaway script derived them from the current output and
-asserted each line it edited; the script is not committed.
+The marked repro today is `midichord_vel` (`=13Caf1`, `=13C0f1`,
+`=13Ca01`), which waits for B5. `scale_inv` (`$3CA2`, `$3CA0`) and
+`midichord_inv` (`=13CA.1`) waited for B2, which deleted their markers:
+their hand-written goldens now pass unchanged. `midichord_inv` uses velocity
+`.` so that B5 cannot change it; CAP-7's literal `=13CAf1`, which both items
+change, is checked, notes only, by the unit test
+`music_midichord_inversion`. When these fixed goldens were written, a
+throwaway script derived them from the current output and asserted each
+line it edited; the script is not committed.
 
 ### Goldens that record current behaviour on purpose
 
@@ -105,13 +107,14 @@ redefines their operator: `bouncer_shapes` by I3, and `arp_patterns` and the
 
 Their patches avoid what Phase 1 changes on purpose: no lowercase `r`
 operator (B1 and B6 change it; `r` appears only as a `$` or `=` selector,
-which those operators lock), no uppercase `$` or `=` selector (B2 changes
-them), and no `=` velocity other than `.` or `z`, which give 127 before and
-after B5. Every `&` and `;` cell keeps y × width + x below 4096: before B1,
-`&` indexed its state with no bounds check and `;` returned early from cell
-4096 on. Each case was captured with `--update`. When the cases were
-written, a throwaway model of the operators' source checked each cell; it
-is not committed.
+which those operators lock), no uppercase `$` or `=` selector (B2 changed
+them; `examples/misc/chord_inversions.orca` and `tests/unit/test_music.c`
+cover them), and no `=` velocity other than `.` or `z`, which give 127
+before and after B5. Every `&` and `;` cell keeps y × width + x below 4096:
+before B1, `&` indexed its state with no bounds check and `;` returned early
+from cell 4096 on. Each case was captured with `--update`. When the cases
+were written, a throwaway model of the operators' source checked each cell;
+it is not committed.
 
 The `R` and `;` pattern `c` goldens assume a 64-bit `Usz`: their hashes
 differ where `Usz` is 32-bit, as on armhf, whose CI job only compiles.
@@ -155,7 +158,8 @@ without `UBSAN_OPTIONS`. CI and the commands above still set
 runner's defaults.
 
 `tool` defines the CORE list once (today `gbuffer.c vmio.c sim.c
-opstate.c ccout.c tick.c`; the other extracted core modules join it later).
+opstate.c ccout.c music.c tick.c`; the other extracted core modules join it
+later).
 `tick.c` is shell code, the tick body and the sustained-note list, held to
 the core rules (spine AD-14), so the unit tests can drive it through a
 recording sink.
@@ -262,8 +266,9 @@ PASS  vmio.c
 PASS  sim.c
 PASS  opstate.c
 PASS  ccout.c
+PASS  music.c
 PASS  tick.c
-include check: 6 files, 6 pass, 0 xfail, 0 fail, 0 xpass; canary detected
+include check: 7 files, 7 pass, 0 xfail, 0 fail, 0 xpass; canary detected
 $ tests/check-nm.sh
 PASS  canary (detected: D canary_extern_init, B canary_extern_zero, d canary_static_init, b canary_static_zero; marker path: canary_extern_zero unmarked, canary_absent matches none)
 PASS  gbuffer.c
@@ -271,8 +276,9 @@ PASS  vmio.c
 PASS  sim.c
 PASS  opstate.c
 PASS  ccout.c
+PASS  music.c
 PASS  tick.c
-nm check: 6 files, 6 pass, 0 xfail, 0 fail, 0 xpass; canary detected
+nm check: 7 files, 7 pass, 0 xfail, 0 fail, 0 xpass; canary detected
 ```
 
 In the summaries, `pass` counts clean files, and `xfail`, `fail` and `xpass`
@@ -306,9 +312,11 @@ count results, so one file can add several.
   even when it is not `const`, because gcc places never-written statics in
   read-only data, so this recipe cannot prove AD-1's rule. B3 checked the
   declarations and recorded a one-off `-O0` `nm` of `sim.o` that lists no
-  writable symbol. An XFAIL line names every symbol it matched, so a CI log
-  records the runner gcc's list, which may differ from the uConsole's; that
-  log is the evidence for any marker change.
+  writable symbol. B2 moved the scale and chord tables to `music.c`, and a
+  one-off `-O0` `nm` of `music.o`, with this recipe's other flags, lists no
+  writable symbol either. An XFAIL line names every symbol it matched, so a
+  CI log records the runner gcc's list, which may differ from the
+  uConsole's; that log is the evidence for any marker change.
 - A marker that names a file outside CORE, a malformed line, any other nm
   pattern (`*_*`, `_*`, `sc*`, `sca?`) or a duplicate (file, pattern) fails
   the run. An nm marker never hides an object with no symbols or a failed

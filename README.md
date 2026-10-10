@@ -35,22 +35,23 @@ Outputs note and octave based on the provided root note, scale/chord type, and d
 - `$.C12` - C Minor scale, 3rd degree → outputs note 'd' (D#/Eb, no octave)
 
 ### Chord Examples (a-z = root position, A-Z = first inversion):
-- `$3Ca2` - C Major chord, 3rd note → outputs '3g' (G3)
-- `$3CA2` - C Major first inversion, 3rd note → outputs '4c' (C4)
+- `$3Ca2` - C Major chord, 3rd note → outputs '3G' (G3)
+- `$3CA2` - C Major first inversion, 3rd note → outputs '4C' (C4)
 
-### Available Scales (0-9):
+<!-- tables:begin -->
+### Available Scales (0-9, `$` only):
 | Value | Scale Type |
 |:-----:|------------|
-|   0   | Major Scale |
-|   1   | Minor Scale |
-|   2   | Dorian Scale |
-|   3   | Lydian Scale |
-|   4   | Mixolydian Scale |
-|   5   | Pentatonic Scale |
-|   6   | Hirajoshi Scale |
-|   7   | Iwato Scale |
-|   8   | Tetratonic Scale |
-|   9   | Fifths Scale |
+|   0   | Major |
+|   1   | Minor |
+|   2   | Dorian |
+|   3   | Lydian |
+|   4   | Mixolydian |
+|   5   | Pentatonic |
+|   6   | Hirajoshi |
+|   7   | Iwato |
+|   8   | Tetratonic |
+|   9   | Fifths |
 
 ### Available Chords (a-z = root, A-Z = first inversion):
 | Value | Chord Type | Root Notes | First Inversion |
@@ -62,25 +63,40 @@ Outputs note and octave based on the provided root note, scale/chord type, and d
 |   e/E   | Major7 | C-E-G-B | E-G-B-C |
 |   f/F   | Minor7 | C-Eb-G-Bb | Eb-G-Bb-C |
 |   g/G   | Dom7 | C-E-G-Bb | E-G-Bb-C |
-|   h/H   | Major6 | C-E-G-A | E-G-A-C |
+|   h/H   | MinorMaj7 | C-Eb-G-B | Eb-G-B-C |
 |   i/I   | Minor6 | C-Eb-G-A | Eb-G-A-C |
-|   j/J   | Dim | C-Eb-Gb | Eb-Gb-C |
-|   k/K   | Dim7 | C-Eb-Gb-A | Eb-Gb-A-C |
-|   l/L   | HalfDim7 | C-Eb-Gb-Bb | Eb-Gb-Bb-C |
-|   m/M   | Aug | C-E-G# | E-G#-C |
-|   n/N   | Aug7 | C-E-G#-Bb | E-G#-Bb-C |
-|   o/O   | Major9 | C-E-G-B-D | E-G-B-D-C |
-|   p/P   | Minor9 | C-Eb-G-Bb-D | Eb-G-Bb-D-C |
-|   q/Q   | Dom9 | C-E-G-Bb-D | E-G-Bb-D-C |
-|   r/R   | Major11 | C-E-G-B-D-F | E-G-B-D-F-C |
-|   s/S   | Minor11 | C-Eb-G-Bb-D-F | Eb-G-Bb-D-F-C |
-|   t/T   | Major13 | C-E-G-B-D-F-A | E-G-B-D-F-A-C |
-|   u/U   | Minor13 | C-Eb-G-Bb-D-F-A | Eb-G-Bb-D-F-A-C |
-|   v/V   | Dom7b9 | C-E-G-Bb-Db | E-G-Bb-Db-C |
-|   w/W   | Dom7#9 | C-E-G-Bb-D# | E-G-Bb-D#-C |
-|   x/X   | Major7#11 | C-E-G-B-F# | E-G-B-F#-C |
-|   y/Y   | Minor7b5 | C-Eb-Gb-Bb | Eb-Gb-Bb-C |
-|   z/Z   | MinorMaj7 | C-Eb-G-B | Eb-G-B-C |
+|   j/J   | Major6 | C-E-G-A | E-G-A-C |
+|   k/K   | Major9 | C-E-G-B-D | E-G-B-C-D |
+|   l/L   | Minor9 | C-Eb-G-Bb-D | Eb-G-Bb-C-D |
+|   m/M   | Major add9 | C-E-G-D | E-G-C-D |
+|   n/N   | Minor add9 | C-Eb-G-D | Eb-G-C-D |
+|   o/O   | Dim | C-Eb-Gb | Eb-Gb-C |
+|   p/P   | Half Dim7 | C-Eb-Gb-Bb | Eb-Gb-Bb-C |
+|   q/Q   | Dim7 | C-Eb-Gb-A | Eb-Gb-A-C |
+|   r/R   | Aug | C-E-G# | E-G#-C |
+|   s/S   | Aug7 | C-E-G#-Bb | E-G#-Bb-C |
+|   t/T   | Dom9 | C-E-G-Bb-D | E-G-Bb-C-D |
+|   u/U   | Dom7b9 | C-E-G-Bb-Db | E-G-Bb-C-Db |
+|   v/V   | Dom7#9 | C-E-G-Bb-D# | E-G-Bb-C-D# |
+|   w/W   | Major 6/9 | C-E-G-A-D | E-G-A-C-D |
+|   x/X   | Minor 6/9 | C-Eb-G-A-D | Eb-G-A-C-D |
+|   y/Y   | Minor11 | C-Eb-G-Bb-F | Eb-G-Bb-C-F |
+|   z/Z   | Minor7b5 | C-Eb-Gb-Bb | Eb-Gb-Bb-C |
+
+### Enriched Chords (0-9, `=` only):
+| Index | Name | Intervals | Notes (C root) |
+|:-----:|:----:|:---------:|:--------------:|
+| 0 | Major+Oct | 0,4,7,12 | C-E-G-C |
+| 1 | Minor+Oct | 0,3,7,12 | C-Eb-G-C |
+| 2 | Sus4+Oct | 0,5,7,12 | C-F-G-C |
+| 3 | Sus2+Oct | 0,2,7,12 | C-D-G-C |
+| 4 | Major7+Oct3rd | 0,4,7,11,16 | C-E-G-B-E |
+| 5 | Minor7+Oct3rd | 0,3,7,10,15 | C-Eb-G-Bb-Eb |
+| 6 | Dom7+Oct5th | 0,4,7,10,19 | C-E-G-Bb-G |
+| 7 | Major6+Oct | 0,4,7,9,12 | C-E-G-A-C |
+| 8 | Minor6+Oct | 0,3,7,9,12 | C-Eb-G-A-C |
+| 9 | Dim+Oct | 0,3,6,12 | C-Eb-Gb-C |
+<!-- tables:end -->
 
 This unified system allows the Scale operator to access both traditional scales for melodic work and a comprehensive chord library for harmonic progressions, with intuitive case-sensitive first inversion support.
 
@@ -100,23 +116,7 @@ The Midichord operator outputs MIDI notes to form chord types using the unified 
 - `=13Cbff` - Plays C minor chord (C-Eb-G) on channel 1, octave 3
 
 ### Available Chord Types
-
-#### Enriched Chords (0-9) - Enhanced versions with strategic octave additions
-| Index | Name | Intervals | Notes (C root) |
-|:-----:|:----:|:---------:|:--------------:|
-| 0 | Major + Oct | 0,4,7,12 | C-E-G-C |
-| 1 | Minor + Oct | 0,3,7,12 | C-Eb-G-C |
-| 2 | Sus4 + Oct | 0,5,7,12 | C-F-G-C |
-| 3 | Sus2 + Oct | 0,2,7,12 | C-D-G-C |
-| 4 | Major7 + Oct3rd | 0,4,7,11,16 | C-E-G-B-E |
-| 5 | Minor7 + Oct3rd | 0,3,7,10,15 | C-Eb-G-Bb-Eb |
-| 6 | Dom7 + Oct5th | 0,4,7,10,19 | C-E-G-Bb-G |
-| 7 | Major6 + Oct | 0,4,7,9,12 | C-E-G-A-C |
-| 8 | Minor6 + Oct | 0,3,7,9,12 | C-Eb-G-A-C |
-| 9 | Dim + Oct | 0,3,6,12 | C-Eb-Gb-C |
-
-#### Root Position Chords (a-z) & First Inversions (A-Z)
-The Midichord operator uses the same chord definitions as the Scale operator (a-z for root positions, A-Z for first inversions). See the Scale Operator section above for the complete chord reference table.
+The chord tables are in the Scale Operator section above: Available Chords for `a`-`z` (root position) and `A`-`Z` (first inversion), the same chords the Scale operator plays, and Enriched Chords for `0`-`9`.
 
 ## Random Operators (`R` and `r`):
 The `R` operator (uppercase) provides pure random generation that runs every tick. The `r` operator (lowercase) requires bang and uses a shuffle-based algorithm to avoid producing identical outputs on consecutive bangs in a creative manner.
@@ -295,6 +295,30 @@ make clean       # removes build/
 ## Changelog
 
 Changes since boorch/bOrca `4f349cd` that alter how an existing patch plays, change what goes out over MIDI, or break the public `orca_run` API, newest first. Each entry has a one-line title, says what changed and why, shows a before/after example, and points at an updated or new patch under `examples/`. The id in brackets at the end of an entry (`P0.1`, `B2`, …) is the item in the fork's implementation spec, the same vocabulary the `.xfail` markers under `tests/` use.
+
+### Uppercase `$` and `=` selectors play first inversions
+
+`$` and `=` looked up their selector with a helper that folds case, so an uppercase selector, `A` to `Z`, played its lowercase chord in root position. The 26 first-inversion tables that uppercase was meant to reach were wrong anyway: Major's, 0 3 8, is C-D#-G# on C. Every scale and chord now lives once, with its name, in a new core module, `music.c`, which decodes the selector from its raw glyph: `0`-`9` are `$`'s scales and `=`'s enriched chords, `a`-`z` the chords in root position, and `A`-`Z` the first inversion of the same chord. The inversion is built from root position: the root moves up an octave, the notes stay in ascending order, and the note count does not change. This breaks patches that use an uppercase selector, whether typed or written by an operator that copies its right input's case (`C`, `R`, `I`, `A`, `B`, `M`, `L` or `Z` with an uppercase right input): a `1CZ` clock feeding `$3C.2`'s selector writes `A` at tick 10, where `$` printed `3G` and now prints `4C`.
+
+- `$` outputs the inversion's notes. `$3CA2` (C major first inversion, degree 2) printed `3G` and now prints `4C`; `$3CA0` printed `3C` and now prints `3E`.
+- `=` plays the inversion. `=13CAf1` played notes 36, 40, 43 (C-E-G) and now plays 40, 43, 48 (E-G-C). Major9, `k` (C-E-G-B-D), inverts to E-G-B-C-D, so `=13CK.1` plays 40, 43, 47, 48, 50.
+- Near octave 9 the raised root can leave the range. `$` then writes nothing, and its previous output stays on the grid: `$9CA2` printed `9G` and now writes nothing. `=` drops the notes above 127: `=19aA.1` sent 118, 122, 125 and now sends 122, 125, dropping 130.
+
+Digits, lowercase letters and every other glyph that the editor and the file loader accept decode as before: a glyph that is not `0`-`9`, `a`-`z` or `A`-`Z` is scale 0 for `$` and enriched chord 0 for `=`. The tooltips show the same names. The README's chord table, whose names and notes were wrong from `h` on, now matches the code, and the scale, chord and enriched-chord tables sit in one block in the Scale Operator section.
+
+For builds that list the core sources themselves: add `music.c`, the new core module (`music.h`), from which `sim.c` and `tooltips.c` read their scales, chords and names. For embedders that pass `orca_run` other bytes: a selector byte of 0x80 or above now decodes like any other glyph, as scale 0 or enriched chord 0; before, its top bit was ignored, so 0xE1 played chord `a`.
+
+Before → after, the repro cells with `cli --events -t 1`:
+
+```
+           before            after
+$3CA2      3G                4C
+$3CA0      3C                3E
+=13CAf1    36 40 43          40 43 48
+=13CK.1    36 40 43 47 50    40 43 47 48 50
+```
+
+Example: `examples/misc/chord_inversions.orca`, which plays every letter selector of `$` and `=`, each lowercase and then uppercase; repro patches: `tests/patches/scale_inv.orca` and `tests/patches/midichord_inv.orca`. (B2)
 
 ### CC glides continue from the last value sent
 
