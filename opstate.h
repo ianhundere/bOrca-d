@@ -41,9 +41,11 @@ enum { Opstate_random_max_size = 36 }; // the values 0-9 and a-z
 
 typedef struct {
   bool initialized; // the generator is seeded and the bag is filled
+  bool has_last;    // last_value holds a value sent; false in a zeroed entry
   U8 current_index; // next position in the bag
   U8 sequence_size;
   U8 last_min, last_max;
+  U8 last_value; // the last value sent, so no bag starts with it (B6)
   U8 sequence[Opstate_random_max_size]; // the shuffled bag
   Prng prng;
 } Opstate_random; // 'r'

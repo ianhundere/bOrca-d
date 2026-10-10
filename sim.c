@@ -1055,7 +1055,8 @@ END_OPERATOR
 
 // BOORCH's new Random Unique. Each lowercase r keeps its own bag in its
 // op-state entry (Opstate_random) and shuffles it with its own PRNG, seeded
-// from random_seed and the cell on its first visit (AD-8).
+// from random_seed and the cell on its first visit (AD-8). It never sends one
+// value twice in a row unless min equals max (B6).
 
 // Fisher-Yates shuffle of the bag.
 static void shuffle_sequence(U8 *array, Usz n, Prng *prng) {
@@ -1071,6 +1072,23 @@ static void shuffle_sequence(U8 *array, Usz n, Prng *prng) {
   }
 }
 
+// Shuffles the bag and starts it over. A bag that would start with the last
+// value sent swaps its first slot with a random other slot, so no value
+// repeats across a reshuffle or a range change; it stays a permutation. A
+// bag of one value repeats it, and a zeroed entry, with no last value, never
+// swaps.
+static void shuffle_bag(Opstate_random *state) {
+  Usz n = state->sequence_size;
+  shuffle_sequence(state->sequence, n, &state->prng);
+  if (n > 1 && state->has_last && state->sequence[0] == state->last_value) {
+    Usz j = 1 + prng_bounded(&state->prng, (U32)(n - 1));
+    U8 temp = state->sequence[0];
+    state->sequence[0] = state->sequence[j];
+    state->sequence[j] = temp;
+  }
+  state->current_index = 0;
+}
+
 static void initialize_sequence(Opstate_random *state, Usz min, Usz max) {
   Usz size = (max >= min) ? (max - min + 1) : 0;
   if (size > Opstate_random_max_size)
@@ -1082,8 +1100,7 @@ static void initialize_sequence(Opstate_random *state, Usz min, Usz max) {
     state->sequence[i] = (U8)(min + i);
   }
 
-  shuffle_sequence(state->sequence, size, &state->prng);
-  state->current_index = 0;
+  shuffle_bag(state);
 }
 
 // Modified random operator for lowercase 'r' - requires bang, uses shuffle to avoid consecutive duplicates
@@ -1132,17 +1149,18 @@ BEGIN_OPERATOR(random)
       state->last_max = (U8)max;
     }
 
-    // Get next value from sequence
+    // Get next value from sequence, and remember it as the last value sent
     Usz result = state->sequence[state->current_index];
     state->current_index++;
+    state->last_value = (U8)result;
+    state->has_last = true;
 
     // Reshuffle if we've used all values
-    if (state->current_index >= state->sequence_size) {
-      shuffle_sequence(state->sequence, state->sequence_size, &state->prng);
-      state->current_index = 0;
-    }
+    if (state->current_index >= state->sequence_size)
+      shuffle_bag(state);
 
-    POKE(1, 0, glyph_of(result));
+    // The output takes the right input's case, even when min equals max
+    POKE(1, 0, glyph_with_case(glyph_of(result), max_glyph));
   } else {
     // Uppercase 'R' - pure random, evaluated every tick
     PORT(0, -1, IN | PARAM, "Min");

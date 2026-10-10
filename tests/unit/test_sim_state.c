@@ -47,6 +47,14 @@ static bool blocks_are_permutations(Glyph const *outputs, Usz count,
   return true;
 }
 
+// The number of outputs equal to the one before them.
+static Usz repeats(Glyph const *outputs, Usz count) {
+  Usz n = 0;
+  for (Usz i = 1; i < count; ++i)
+    n += outputs[i] == outputs[i - 1];
+  return n;
+}
+
 // The events of two lists match, field by field. Only note events are
 // expected here; any other type counts as a mismatch.
 static bool events_equal(Oevent_list const *a, Oevent_list const *b) {
@@ -222,6 +230,9 @@ void test_sim_two_r_permutations(void) {
   CHECK(blocks_are_permutations(small, Ticks, 0, 4));
   CHECK(blocks_are_permutations(large, Ticks, 0, 10));
   CHECK(memcmp(small, small_alone, sizeof small) == 0);
+  // The r_single and r_shared repros (B6): no value twice in a row.
+  CHECK(repeats(small, Ticks) == 0);
+  CHECK(repeats(large, Ticks) == 0);
   // A different seed gives a different sequence, and is still a permutation.
   memcpy(grid, both, sizeof grid);
   opstate_clear(&store);
@@ -235,6 +246,227 @@ void test_sim_two_r_permutations(void) {
   oevent_list_deinit(&events);
   opstate_free(&store);
   opstate_free(&store_alone);
+}
+
+// Lowercase r after B6 (CAP-11). Each test bangs one r at (2, 2) of a 4x6
+// grid, the cell r_single's r sits in, from a D1 two rows above it, and
+// reads its output from the cell below it.
+enum { R_h = 4, R_w = 6, R_y = 2, R_x = 2, R_out = (R_y + 1) * R_w + R_x };
+
+static void r_grid(Glyph *grid, char min, char max) {
+  memcpy(grid,
+         "..D1.."
+         "......"
+         ".?r?.."
+         "......",
+         R_h * R_w);
+  grid[R_y * R_w + R_x - 1] = (Glyph)min;
+  grid[R_y * R_w + R_x + 1] = (Glyph)max;
+}
+
+// Runs min r max for count ticks under seed on a fresh store and records
+// each output. A non-zero alt_max replaces the max on every odd tick, so the
+// range changes on every bang.
+static void run_r(char min, char max, char alt_max, Usz seed, Usz count,
+                  Glyph *outputs) {
+  Glyph grid[R_h * R_w];
+  Mark marks[R_h * R_w];
+  r_grid(grid, min, max);
+  Opstate_store store;
+  opstate_init(&store);
+  Oevent_list events;
+  oevent_list_init(&events);
+  for (Usz tick = 0; tick < count; ++tick) {
+    if (alt_max)
+      grid[R_y * R_w + R_x + 1] = (Glyph)(tick % 2 ? alt_max : max);
+    run_tick(grid, marks, R_h, R_w, tick, &events, seed, &store);
+    outputs[tick] = grid[R_out];
+  }
+  oevent_list_deinit(&events);
+  opstate_free(&store);
+}
+
+static char const r_digits[] = "0123456789abcdefghijklmnopqrstuvwxyz";
+static Usz const r_seeds[] = {0, 1, 7};
+
+// No value twice in a row, over every range from 0r1 to 0rz and three
+// seeds, and every full bag a permutation of min..max, max included. 0r1
+// repeated about one bang in four before B6.
+void test_sim_r_no_repeat(void) {
+  enum { Bangs = 1000 };
+  Glyph out[Bangs];
+  Usz cases = 0;
+  for (Usz s = 0; s < sizeof r_seeds / sizeof r_seeds[0]; ++s) {
+    for (Usz max = 1; max < 36; ++max) {
+      Usz n = max + 1;
+      run_r('0', r_digits[max], 0, r_seeds[s], Bangs, out);
+      CHECK(repeats(out, Bangs) == 0);
+      CHECK(blocks_are_permutations(out, Bangs / n * n, 0, n));
+      ++cases;
+    }
+  }
+  CHECK(cases == 105);
+}
+
+// A range change rebuilds the bag, which must not start with the value just
+// sent: the max alternates 3 and 4 on every bang. A swap only at the end of
+// a bag repeated about one bang in five here.
+void test_sim_r_range_change(void) {
+  enum { Bangs = 1000 };
+  Glyph out[Bangs];
+  for (Usz s = 0; s < sizeof r_seeds / sizeof r_seeds[0]; ++s) {
+    run_r('0', '3', '4', r_seeds[s], Bangs, out);
+    CHECK(repeats(out, Bangs) == 0);
+    Usz fours = 0, outside = 0;
+    for (Usz i = 0; i < Bangs; ++i) {
+      fours += out[i] == '4';
+      outside += out[i] < '0' || out[i] > '4' || (out[i] == '4' && i % 2 == 0);
+    }
+    CHECK(fours > 0); // the range really changes
+    CHECK(outside == 0);
+  }
+}
+
+// One value repeats, by definition, and keeps the right input's case.
+void test_sim_r_single_value(void) {
+  enum { Bangs = 20 };
+  Glyph out[Bangs];
+  run_r('5', '5', 0, 0, Bangs, out);
+  for (Usz i = 0; i < Bangs; ++i)
+    CHECK(out[i] == '5');
+  run_r('c', 'C', 0, 0, Bangs, out);
+  for (Usz i = 0; i < Bangs; ++i)
+    CHECK(out[i] == 'C');
+}
+
+// The seed still drives r as B1 set it up: two runs of r_shared's patch at
+// the same seed give the same two sequences, and a different seed changes
+// each of them.
+void test_sim_r_seed(void) {
+  enum { H = 4, W = 12, Ticks = 40 };
+  static char const patch[H * W + 1] = "..D1.....D1."
+                                       "............"
+                                       ".0r3....0r9."
+                                       "............";
+  static Usz const seeds[3] = {0, 0, 1};
+  Glyph small[3][Ticks], large[3][Ticks];
+  for (Usz s = 0; s < 3; ++s) {
+    Glyph grid[H * W];
+    Mark marks[H * W];
+    memcpy(grid, patch, sizeof grid);
+    Opstate_store store;
+    opstate_init(&store);
+    Oevent_list events;
+    oevent_list_init(&events);
+    for (Usz tick = 0; tick < Ticks; ++tick) {
+      run_tick(grid, marks, H, W, tick, &events, seeds[s], &store);
+      small[s][tick] = grid[3 * W + 2];
+      large[s][tick] = grid[3 * W + 9];
+    }
+    oevent_list_deinit(&events);
+    opstate_free(&store);
+    CHECK(repeats(small[s], Ticks) == 0 && repeats(large[s], Ticks) == 0);
+    CHECK(blocks_are_permutations(small[s], Ticks, 0, 4));
+    CHECK(blocks_are_permutations(large[s], Ticks, 0, 10));
+  }
+  CHECK(memcmp(small[0], small[1], sizeof small[0]) == 0);
+  CHECK(memcmp(large[0], large[1], sizeof large[0]) == 0);
+  CHECK(memcmp(small[0], small[2], sizeof small[0]) != 0);
+  CHECK(memcmp(large[0], large[2], sizeof large[0]) != 0);
+}
+
+// Each glyph of outputs is in the set, and each full bag of n holds n
+// distinct glyphs.
+static bool bags_within(Glyph const *outputs, Usz count, Usz n,
+                        char const *set) {
+  if (n == 0 || count % n != 0)
+    return false;
+  for (Usz b = 0; b < count; b += n) {
+    bool seen[128] = {0};
+    for (Usz i = b; i < b + n; ++i) {
+      Glyph g = outputs[i];
+      if (!g || (g & 0x80) || !strchr(set, g) || seen[(int)g])
+        return false;
+      seen[(int)g] = true;
+    }
+  }
+  return true;
+}
+
+// The output takes the right input's case, as R's does: an uppercase max
+// gives uppercase letters, a digit or lowercase max lowercase ones, and
+// digits stay digits. The min's case does not count.
+void test_sim_r_case(void) {
+  enum { Bangs = 13 * 8 };
+  Glyph out[Bangs];
+  for (Usz s = 0; s < sizeof r_seeds / sizeof r_seeds[0]; ++s) {
+    run_r('0', 'C', 0, r_seeds[s], Bangs, out);
+    CHECK(bags_within(out, Bangs, 13, "0123456789ABC"));
+    CHECK(repeats(out, Bangs) == 0);
+    run_r('c', '0', 0, r_seeds[s], Bangs, out);
+    CHECK(bags_within(out, Bangs, 13, "0123456789abc"));
+    CHECK(repeats(out, Bangs) == 0);
+    run_r('a', 'C', 0, r_seeds[s], 3 * 8, out);
+    CHECK(bags_within(out, 3 * 8, 3, "ABC"));
+    CHECK(repeats(out, 3 * 8) == 0);
+    run_r('c', 'C', 0, r_seeds[s], 8, out);
+    CHECK(bags_within(out, 8, 1, "C"));
+  }
+}
+
+// The first bag of a new r: B1's seeding, prng_seed(seed, y, x), and its
+// Fisher-Yates shuffle, with no swap, since a zeroed entry has no last value.
+static void reference_first_bag(Usz seed, Usz y, Usz x, Usz n, U8 *bag) {
+  Prng rng;
+  prng_seed(&rng, seed, y, x);
+  for (Usz i = 0; i < n; ++i)
+    bag[i] = (U8)i;
+  for (Usz i = n - 1; i > 0; --i) {
+    Usz j = prng_bounded(&rng, (U32)(i + 1));
+    U8 t = bag[i];
+    bag[i] = bag[j];
+    bag[j] = t;
+  }
+}
+
+// A new cell and a cleared store never swap against stale state. 0r3's first
+// bag is the reference shuffle exactly, including the seeds whose bag starts
+// with 0, the value a zeroed last_value holds. After the r sends the value
+// its first bag starts with, a clear starts it over, and the next bag is the
+// reference again, though it repeats that value.
+void test_sim_r_first_visit_and_clear(void) {
+  enum { N = 4, Seeds = 32, Limit = 200 };
+  Usz zero_first = 0;
+  for (Usz seed = 0; seed < Seeds; ++seed) {
+    U8 ref[N];
+    reference_first_bag(seed, R_y, R_x, N, ref);
+    zero_first += ref[0] == 0;
+    Glyph grid[R_h * R_w];
+    Mark marks[R_h * R_w];
+    r_grid(grid, '0', '3');
+    Opstate_store store;
+    opstate_init(&store);
+    Oevent_list events;
+    oevent_list_init(&events);
+    Usz tick = 0;
+    for (; tick < N; ++tick) {
+      run_tick(grid, marks, R_h, R_w, tick, &events, seed, &store);
+      CHECK(grid[R_out] == r_digits[ref[tick]]);
+    }
+    do {
+      run_tick(grid, marks, R_h, R_w, tick, &events, seed, &store);
+      ++tick;
+    } while (grid[R_out] != r_digits[ref[0]] && tick < Limit);
+    CHECK(grid[R_out] == r_digits[ref[0]]);
+    opstate_clear(&store);
+    for (Usz i = 0; i < N; ++i, ++tick) {
+      run_tick(grid, marks, R_h, R_w, tick, &events, seed, &store);
+      CHECK(grid[R_out] == r_digits[ref[i]]);
+    }
+    oevent_list_deinit(&events);
+    opstate_free(&store);
+  }
+  CHECK(zero_first > 0); // the check above can see a swap against 0
 }
 
 // A patch with each stateful operator: a banged ; and r, a free-running &,

@@ -128,10 +128,12 @@ The MIDI note operator (`:`), the monophonic note operator (`%`) and the Midicho
 Uppercase reads like lowercase, so `F` is 119 too. `examples/misc/velocity.orca` plays all three operators through the same velocity glyphs.
 
 ## Random Operators (`R` and `r`):
-The `R` operator (uppercase) provides pure random generation that runs every tick. The `r` operator (lowercase) requires bang and uses a shuffle-based algorithm to avoid producing identical outputs on consecutive bangs in a creative manner.
+The `R` operator (uppercase) provides pure random generation that runs every tick. The `r` operator (lowercase) requires bang and deals its values from a shuffled bag, so it never sends the same value twice in a row.
 
-- **`R` (uppercase)**: Pure random, runs every tick
-- **`r` (lowercase)**: Shuffle-based random, requires bang to avoid consecutive duplicates
+- **`R` (uppercase)**: Pure random, runs every tick. Its max is exclusive: `R` outputs a value from min up to, but not including, max, and a max of `0` stands for 36.
+- **`r` (lowercase)**: Shuffle-based random, requires bang. Its max is inclusive: each bang sends the next value of a bag that holds every value from min to max once, shuffled for each `r` from the seed and its cell. Unlike `R`'s, a max of `0` is 0: `5r0` deals 0 to 5, and `0r0` always sends 0. A new bag, after the last value or after min or max changes, never starts with the value just sent, so `r` never sends the same value twice in a row (except after Ctrl+R, a new file or an opened file, which clear its state: it starts over, and its first value may repeat the last one sent). A two-value `r` therefore strictly alternates: `0r1` gives 1010… forever, and the seed only picks which value comes first. Only when min equals max does its one value repeat.
+
+Both swap min and max when min is the larger, and both take their right input's case: an uppercase max gives uppercase letters, and digits stay digits. `R` skips this when min equals max and outputs that value in lowercase; `r` keeps the max's case then too, so `crC` gives `C`. An uppercase letter directly left of `r` is an operator itself, and most (`A`, `B`, `C`, `D` …) run first and take `r` as their input, so give `r` a lowercase or digit min: `arC`, not `ArC`. Like any uppercase letter, an uppercase max, and the uppercase letters `r` writes, run as operators on every tick `r` is not banged; so bang `r` every tick, or feed its output to an input that locks it, such as `:`'s note, as `examples/misc/random_unique.orca` does. That patch plays two `r`.
 
 
 ## Arpeggiator Operator (`;`):
@@ -304,6 +306,31 @@ make clean       # removes build/
 ## Changelog
 
 Changes since boorch/bOrca `4f349cd` that alter how an existing patch plays, change what goes out over MIDI, or break the public `orca_run` API, newest first. Each entry has a one-line title, says what changed and why, shows a before/after example, and points at an updated or new patch under `examples/`. The id in brackets at the end of an entry (`P0.1`, `B2`, …) is the item in the fork's implementation spec, the same vocabulary the `.xfail` markers under `tests/` use.
+
+### Lowercase `r` never sends one value twice in a row, and takes its right input's case
+
+Since B1 each lowercase `r` keeps its own bag, but it could still send one value twice in a row, in two ways. A new bag, shuffled after the last value of the old one, could start with that value: `0r1` repeated about one bang in four. And a bag rebuilt after min or max changed could start with the value just sent. Each `r` now remembers the last value it sent, and whenever it shuffles a bag, a bag that would start with that value swaps its first slot with a random other slot. Every bag still holds each value from min to max once, max included. Only an `r` whose min equals max repeats, since it has one value, and a two-value `r` now strictly alternates: `0r1` gives 1010… forever, where before it did not. `r` also ignored its right input's case, so an uppercase max still gave lowercase letters; its output now takes the right input's case, as `R`'s does (`R` skips it when min equals max; `r` does not). This breaks patches that use `r`:
+
+- `r` draws a new sequence from its first bag that would have started with the value just sent; until then, its values are the same as before. The test repro `0r3` at `--seed 0` changes from tick 28, its eighth bag, and the `0r9` beside it in `r_shared` is unchanged over its 40 ticks.
+- An uppercase max now gives uppercase letters: `arC` into a note input played A#, B#, C# and now plays A, B, C. A digit or lowercase max still gives lowercase letters, and digits stay digits. An uppercase letter directly left of `r` is an operator itself, and most (`A`, `B`, `C`, `D` …) run first and take `r` as their input, so give `r` a lowercase or digit min. Like any uppercase letter, an uppercase max, and the uppercase letters `r` now writes, run as operators on every tick `r` is not banged; so bang `r` every tick, or feed its output to an input that locks it, such as `:`'s note.
+
+The seeding is unchanged: each `r` still seeds its PCG32 from the run's seed and its cell, as B1 set it up, so its sequence follows `--seed` and is the same on every platform.
+
+For embedders: `Opstate_random` (`opstate.h`) gains two fields, `has_last` and `last_value`. They fit in the struct's padding, so its size does not change (64 bytes on the uConsole). A zeroed entry has no last value, so a new cell and `opstate_clear` still start an `r` fresh, and its first bag may then start with the value it sent before the clear.
+
+The uConsole appliance is unaffected: its `default.orca` has no lowercase `r`.
+
+Before → after, `cli --events --seed 0`: ticks 24 to 39 of the `0r3` in `tests/patches/r_single.orca`, four bangs per bag, and the first ten bangs of the `crG` in `examples/misc/random_unique.orca`, which feeds the note input of `:13.f1`:
+
+```
+          before                  after
+0r3       0213 3120 0213 1320     0213 2130 3201 2013
+crG       c d g f e d e c f g     C D G F E D E C F G
+```
+
+Before, that `crG` played C#, D#, G# and so on, and repeated a note 3 times in 64 bangs; now it plays C, D, G and never repeats one.
+
+Example: `examples/misc/random_unique.orca`, where `crg` and `crG` bang notes on channels 0 and 1 every tick, `crg` lowercase notes, which are sharps (`e` is E#, which is F), and `crG` the naturals C to G, and neither plays a note twice in a row; repro patches: `tests/patches/r_single.orca` and `tests/patches/r_shared.orca`. (B6)
 
 ### `=` reads velocity like `:` and `%`, and a velocity worth 0 sends nothing
 

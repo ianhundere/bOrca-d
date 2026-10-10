@@ -21,6 +21,12 @@
   X(sim_bouncer_overflow_fixture)                                              \
   X(sim_far_cell)                                                              \
   X(sim_two_r_permutations)                                                    \
+  X(sim_r_no_repeat)                                                           \
+  X(sim_r_range_change)                                                        \
+  X(sim_r_single_value)                                                        \
+  X(sim_r_seed)                                                                \
+  X(sim_r_case)                                                                \
+  X(sim_r_first_visit_and_clear)                                               \
   X(sim_preview_isolation)                                                     \
   X(sim_clear_and_prune)                                                       \
   X(ccout_glide_continuity)                                                    \

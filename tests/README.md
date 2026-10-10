@@ -80,14 +80,20 @@ not committed.
 
 ### Goldens that record current behaviour on purpose
 
-`r_single` and `r_shared` record lowercase `r` as it is today. Each `r`
+`r_single` and `r_shared` record lowercase `r` as B6 left it. Each `r`
 keeps its own bag in the op-state store and shuffles it with the PCG32 in
 `prng.h`, seeded from `--seed`, its row and its column, so the goldens hold
 the same stream on every platform, and `r_shared`'s `0r3` emits exactly
-`r_single`'s sequence. They are replaced, not marked expected-fail: B1
-replaced the glibc `rand()` stream they held before, when it removed
-`rand()` from `sim.c` (spine AD-1), and B6 replaces them again when it fixes
-`r`. B6 proves the no-repeat and permutation properties in a unit test.
+`r_single`'s sequence. A bag that would start with the value just sent
+swaps its first slot with a random other slot, so neither golden sends a
+value twice in a row. They were replaced, not marked expected-fail, twice:
+B1 replaced the glibc `rand()` stream they held before, when it removed
+`rand()` from `sim.c` (spine AD-1), and B6 replaced them again when it fixed
+`r`; only the `0r3` column changed, from tick 28, where its eighth bag
+started with the value just sent. The unit tests `sim_r_*` in
+`test_sim_state.c` prove no-repeat and permutation over every range from
+`0r1` to `0rz`, and range change, seed, case, single value and first visit
+on fixed patches.
 
 Eight characterization goldens pin, unmarked, what the operators that
 Phase 1 touches produce today, so a refactor that changes their output
@@ -107,7 +113,7 @@ redefines their operator: `bouncer_shapes` by I3, and `arp_patterns` and the
 | `chord_notes` | `=` with every digit and lowercase chord at velocity `.` and at `z`, an octave-9 chord that drops the notes above 127, input octave `a` clamped to 9, a channel above 15, and `:13Cf1` | `-t 1` | none |
 
 Their patches avoid what Phase 1 changes on purpose: no lowercase `r`
-operator (B1 and B6 change it; `r` appears only as a `$` or `=` selector,
+operator (B1 and B6 changed it; `r` appears only as a `$` or `=` selector,
 which those operators lock), no uppercase `$` or `=` selector (B2 changed
 them; `examples/misc/chord_inversions.orca` and `tests/unit/test_music.c`
 cover them), and no `=` velocity other than `.` or `z`, which gave 127
