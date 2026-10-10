@@ -2,7 +2,9 @@
 // item B2, CAP-7; spine AD-19). The tables below are written out by hand,
 // independently of music.c, with the 26 first inversions spelled out. Each of
 // the 62 selectors of each operator is checked through music_decode, through
-// orca_run and through music_selector_name.
+// orca_run and through music_selector_name. The velocity tests at the end
+// check, through orca_run, the mapping that `:`, `%` and `=` share (B5,
+// CAP-10).
 #include "../../gbuffer.h"
 #include "../../music.h"
 #include "../../opstate.h"
@@ -129,9 +131,10 @@ enum { Grid_w = 10 };
 
 // Runs tick 0 of a 2 x Grid_w grid. Row 0 holds text from column 1, and row
 // 1 holds below at column 1 ('*' bangs the operator above it). The grid is
-// left in grid and the events in *events.
+// left in grid, the events in *events and, unless marks_out is NULL, the
+// marks in marks_out.
 static void run_cells(char const *text, Glyph below, Glyph grid[2 * Grid_w],
-                      Oevent_list *events) {
+                      Mark *marks_out, Oevent_list *events) {
   Mark marks[2 * Grid_w];
   Usz len = strlen(text);
   CHECK(len < Grid_w);
@@ -147,6 +150,8 @@ static void run_cells(char const *text, Glyph below, Glyph grid[2 * Grid_w],
   oevent_list_clear(events);
   orca_run(grid, marks, 2, Grid_w, 0, events, 0, &ctx);
   opstate_free(&store);
+  if (marks_out)
+    memcpy(marks_out, marks, sizeof marks);
 }
 
 static char const note_names[] = "CcDdEFfGgAaB";
@@ -158,7 +163,7 @@ static int scale_out(char const *text, Glyph *octave_g, Glyph *note_g) {
   Glyph grid[2 * Grid_w];
   Oevent_list events;
   oevent_list_init(&events);
-  run_cells(text, '.', grid, &events);
+  run_cells(text, '.', grid, NULL, &events);
   CHECK(events.count == 0);
   oevent_list_deinit(&events);
   *octave_g = grid[Grid_w];     // (1, -1) from the `$` at column 1
@@ -175,21 +180,27 @@ static int scale_midi(char const *text) {
 }
 
 typedef struct {
-  U8 channel, midi, velocity, duration;
+  U8 channel, midi, velocity, duration, mono;
 } Note;
 
 enum { Notes_max = 8 };
 
-// Bangs text, a `=` and its six inputs ("=13CA.1"), once, and writes its
-// notes to notes in event order. Returns their count, or Notes_max + 1 for
-// an event that is not a note or for more than Notes_max events. The entries
-// of notes that no note filled are 0.
-static Usz chord_out(char const *text, Note notes[Notes_max]) {
+// Bangs text, a `=` and its six inputs ("=13CA.1"), or a `:` or `%` and its
+// five ("%13Cf1"), once, and writes its notes to notes in event order.
+// Returns their count, or Notes_max + 1 for an event that is not a note or
+// for more than Notes_max events. The entries of notes that no note filled
+// are 0. Unless out_marked is NULL, *out_marked is whether the operator
+// marked its own cell as an output.
+static Usz bang_out(char const *text, Note notes[Notes_max],
+                    bool *out_marked) {
   memset(notes, 0, Notes_max * sizeof *notes);
   Glyph grid[2 * Grid_w];
+  Mark marks[2 * Grid_w];
   Oevent_list events;
   oevent_list_init(&events);
-  run_cells(text, '*', grid, &events);
+  run_cells(text, '*', grid, marks, &events);
+  if (out_marked)
+    *out_marked = (marks[1] & Mark_flag_output) != 0;
   Usz n = events.count > Notes_max ? Notes_max + 1 : events.count;
   for (Usz i = 0; i < events.count && i < Notes_max; ++i) {
     if (events.buffer[i].any.oevent_type != Oevent_type_midi_note) {
@@ -201,9 +212,14 @@ static Usz chord_out(char const *text, Note notes[Notes_max]) {
     notes[i].midi = (U8)(e->octave * 12 + e->note);
     notes[i].velocity = e->velocity;
     notes[i].duration = e->duration;
+    notes[i].mono = e->mono;
   }
   oevent_list_deinit(&events);
   return n;
+}
+
+static Usz chord_out(char const *text, Note notes[Notes_max]) {
+  return bang_out(text, notes, NULL);
 }
 
 // text plays exactly the MIDI notes want[0..count), in order.
@@ -295,13 +311,16 @@ void test_music_scale_inversion(void) {
   CHECK(octave_g == '3' && note_g == 'E');
 }
 
-// `=13CAf1` plays E-G-C (40, 43, 48); `=13Caf1` still plays C-E-G. Only the
-// notes are checked: B5 changes velocity f.
+// `=13CAf1` plays E-G-C (40, 43, 48); `=13Caf1` still plays C-E-G. Since
+// B5, velocity f is 119 on every note.
 void test_music_midichord_inversion(void) {
   CHECK(chord_plays("=13CAf1", 3, (U8 const[]){40, 43, 48}));
   CHECK(chord_plays("=13Caf1", 3, (U8 const[]){36, 40, 43}));
-  // tests/patches/midichord_inv.orca's =13CA.1 also pins velocity 127.
   Note notes[Notes_max];
+  CHECK(chord_out("=13CAf1", notes) == 3);
+  CHECK(notes[0].velocity == 119 && notes[1].velocity == 119 &&
+        notes[2].velocity == 119);
+  // tests/patches/midichord_inv.orca's =13CA.1 also pins velocity 127.
   CHECK(chord_out("=13CA.1", notes) == 3);
   CHECK(notes[0].velocity == 127 && notes[2].midi == 48);
 }
@@ -416,4 +435,111 @@ void test_music_shared_intervals(void) {
         named(Music_op_scale, 'a', "Major"));
   CHECK(named(Music_op_scale, '1', "Minor") &&
         named(Music_op_scale, 'b', "Minor"));
+}
+
+// Velocity (B5, CAP-10). `:`, `%` and `=` share one mapping: `.` is 127, a
+// glyph worth 0 sends nothing, and any other value v gives min(v x 8 - 1,
+// 127). Before B5, `=` used v x 127 / 35 and sent a glyph worth 0 at
+// velocity 0.
+
+// Bangs text once: it plays count notes, each at velocity vel and with mono
+// flag mono.
+static bool plays_at(char const *text, Usz count, U8 vel, U8 mono) {
+  Note notes[Notes_max];
+  if (bang_out(text, notes, NULL) != count)
+    return false;
+  for (Usz i = 0; i < count; ++i)
+    if (notes[i].velocity != vel || notes[i].mono != mono)
+      return false;
+  return true;
+}
+
+// Velocity glyph g plays at vel on all three operators: `:13C?1` and
+// `%13C?1` play one note, `%`'s with its mono flag set, and `=13Ca?1` three.
+static bool velocity_everywhere(Glyph g, U8 vel) {
+  char const midi[] = {':', '1', '3', 'C', g, '1', '\0'};
+  char const mono[] = {'%', '1', '3', 'C', g, '1', '\0'};
+  char const chord[] = {'=', '1', '3', 'C', 'a', g, '1', '\0'};
+  return plays_at(midi, 1, vel, 0) && plays_at(mono, 1, vel, 1) &&
+         plays_at(chord, 3, vel, 0);
+}
+
+// `=13Caf1` plays C-E-G at 119, where it played 54, and `=13C0f1` all four
+// notes of enriched chord 0 at 119.
+void test_music_velocity_midichord(void) {
+  CHECK(chord_plays("=13Caf1", 3, (U8 const[]){36, 40, 43}));
+  CHECK(plays_at("=13Caf1", 3, 119, 0));
+  CHECK(chord_plays("=13C0f1", 4, (U8 const[]){36, 40, 43, 48}));
+  CHECK(plays_at("=13C0f1", 4, 119, 0));
+}
+
+// The scale points, the same on `:`, `%` and `=`: `1` is 7, `7` 55, `f` and
+// `F` 119, `g`, `z` and `Z` 127, and `.` 127. Every value from 1 to 35, in
+// either case, gives min(v x 8 - 1, 127) on all three.
+void test_music_velocity_scale_points(void) {
+  static struct {
+    Glyph glyph;
+    U8 velocity;
+  } const points[] = {{'1', 7},   {'7', 55},  {'f', 119}, {'F', 119},
+                      {'g', 127}, {'z', 127}, {'Z', 127}, {'.', 127}};
+  Usz bad_point = 0;
+  for (Usz i = 0; i < ORCA_ARRAY_COUNTOF(points); ++i)
+    bad_point += !velocity_everywhere(points[i].glyph, points[i].velocity);
+  CHECK(bad_point == 0);
+
+  static char const glyphs[] =
+      "123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+  Usz checked = 0, bad = 0;
+  for (char const *p = glyphs; *p; ++p) {
+    int v = *p <= '9' ? *p - '0' : (*p | 0x20) - 'a' + 10;
+    int want = v * 8 - 1 > 127 ? 127 : v * 8 - 1;
+    bad += !velocity_everywhere(*p, (U8)want);
+    ++checked;
+  }
+  CHECK(checked == 61);
+  CHECK(bad == 0);
+}
+
+// `:` and `%` are unchanged: `:13Cf1` and `%13Cf1` play note 36 on channel
+// 1 at 119, `%` with its mono flag set.
+void test_music_velocity_midi_unchanged(void) {
+  Note notes[Notes_max];
+  CHECK(bang_out(":13Cf1", notes, NULL) == 1);
+  CHECK(notes[0].channel == 1 && notes[0].midi == 36 &&
+        notes[0].velocity == 119 && notes[0].mono == 0 &&
+        notes[0].duration == 1);
+  CHECK(bang_out("%13Cf1", notes, NULL) == 1);
+  CHECK(notes[0].channel == 1 && notes[0].midi == 36 &&
+        notes[0].velocity == 119 && notes[0].mono == 1 &&
+        notes[0].duration == 1);
+}
+
+// A velocity glyph worth 0, `0` or any glyph that is not 0-9, a-z or A-Z,
+// sends nothing: `=` no longer sends velocity-0 note-ons, which synths read
+// as note-offs. `=` still marks its own cell as an output before it checks
+// for a bang. `:` and `%` return before marking theirs, as before B5, and
+// `%` sends no event, so a mono note it holds keeps sounding.
+void test_music_velocity_zero(void) {
+  static char const *const chords[] = {"=13Ca01", "=13Ca;1", "=13Ca*1",
+                                       "=13Ca#1"};
+  static char const *const notes_only[] = {":13C01", ":13C;1", ":13C*1",
+                                           "%13C01", "%13C;1"};
+  Note notes[Notes_max];
+  for (Usz i = 0; i < ORCA_ARRAY_COUNTOF(chords); ++i) {
+    bool marked = false;
+    CHECK(bang_out(chords[i], notes, &marked) == 0);
+    CHECK(marked);
+  }
+  for (Usz i = 0; i < ORCA_ARRAY_COUNTOF(notes_only); ++i) {
+    bool marked = true;
+    CHECK(bang_out(notes_only[i], notes, &marked) == 0);
+    CHECK(!marked);
+  }
+  // The same cells at velocity 1 play, and mark their cell.
+  bool marked = false;
+  CHECK(bang_out("=13Ca11", notes, &marked) == 3 && marked);
+  marked = false;
+  CHECK(bang_out(":13C11", notes, &marked) == 1 && marked);
+  marked = false;
+  CHECK(bang_out("%13C11", notes, &marked) == 1 && marked);
 }

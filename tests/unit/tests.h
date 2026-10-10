@@ -74,7 +74,11 @@
   X(music_other_glyphs)                                                        \
   X(music_octave_overflow)                                                     \
   X(music_names)                                                               \
-  X(music_shared_intervals)
+  X(music_shared_intervals)                                                    \
+  X(music_velocity_midichord)                                                  \
+  X(music_velocity_scale_points)                                               \
+  X(music_velocity_midi_unchanged)                                             \
+  X(music_velocity_zero)
 
 // The full list for each adapter FEAT_ flag, and for the runner's failure
 // canary, whatever the flags.

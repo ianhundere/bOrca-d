@@ -67,15 +67,16 @@ then part of the review.
    that two items change is split so that each case waits for one.
 4. Run the suite: the case must report XFAIL, not FAIL.
 
-The marked repro today is `midichord_vel` (`=13Caf1`, `=13C0f1`,
-`=13Ca01`), which waits for B5. `scale_inv` (`$3CA2`, `$3CA0`) and
-`midichord_inv` (`=13CA.1`) waited for B2, which deleted their markers:
-their hand-written goldens now pass unchanged. `midichord_inv` uses velocity
-`.` so that B5 cannot change it; CAP-7's literal `=13CAf1`, which both items
-change, is checked, notes only, by the unit test
-`music_midichord_inversion`. When these fixed goldens were written, a
-throwaway script derived them from the current output and asserted each
-line it edited; the script is not committed.
+No marked repro remains. `scale_inv` (`$3CA2`, `$3CA0`) and
+`midichord_inv` (`=13CA.1`) waited for B2, and `midichord_vel` (`=13Caf1`,
+`=13C0f1`, `=13Ca01`) for B5; each item deleted the markers that waited
+for it, and the hand-written goldens now pass unchanged. `midichord_inv`
+used velocity `.` so that B5 could not change it; CAP-7's literal
+`=13CAf1`, which both items changed, is checked by the unit test
+`music_midichord_inversion`, its notes and, since B5, its velocity of 119.
+When these fixed goldens were written, a throwaway script derived them
+from the current output and asserted each line it edited; the script is
+not committed.
 
 ### Goldens that record current behaviour on purpose
 
@@ -109,7 +110,7 @@ Their patches avoid what Phase 1 changes on purpose: no lowercase `r`
 operator (B1 and B6 change it; `r` appears only as a `$` or `=` selector,
 which those operators lock), no uppercase `$` or `=` selector (B2 changed
 them; `examples/misc/chord_inversions.orca` and `tests/unit/test_music.c`
-cover them), and no `=` velocity other than `.` or `z`, which give 127
+cover them), and no `=` velocity other than `.` or `z`, which gave 127
 before and after B5. Every `&` and `;` cell keeps y × width + x below 4096:
 before B1, `&` indexed its state with no bounds check and `;` returned early
 from cell 4096 on. Each case was captured with `--update`. When the cases

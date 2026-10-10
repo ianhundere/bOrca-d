@@ -118,6 +118,15 @@ The Midichord operator outputs MIDI notes to form chord types using the unified 
 ### Available Chord Types
 The chord tables are in the Scale Operator section above: Available Chords for `a`-`z` (root position) and `A`-`Z` (first inversion), the same chords the Scale operator plays, and Enriched Chords for `0`-`9`.
 
+## Note Velocity (`:`, `%` and `=`)
+The MIDI note operator (`:`), the monophonic note operator (`%`) and the Midichord operator (`=`) read their velocity input the same way:
+
+- `.` is 127.
+- `0`, or any other glyph worth 0 (any glyph but `.` that is not `0`-`9`, `a`-`z` or `A`-`Z`, such as `*`, `#` or `;`), sends nothing.
+- Any other glyph is worth v, `1`-`9` for 1 to 9 and `a`-`z` for 10 to 35, and plays at v × 8 − 1, at most 127: `1` is 7, `7` is 55, `f` is 119, and `g` to `z` are 127.
+
+Uppercase reads like lowercase, so `F` is 119 too. `examples/misc/velocity.orca` plays all three operators through the same velocity glyphs.
+
 ## Random Operators (`R` and `r`):
 The `R` operator (uppercase) provides pure random generation that runs every tick. The `r` operator (lowercase) requires bang and uses a shuffle-based algorithm to avoid producing identical outputs on consecutive bangs in a creative manner.
 
@@ -295,6 +304,37 @@ make clean       # removes build/
 ## Changelog
 
 Changes since boorch/bOrca `4f349cd` that alter how an existing patch plays, change what goes out over MIDI, or break the public `orca_run` API, newest first. Each entry has a one-line title, says what changed and why, shows a before/after example, and points at an updated or new patch under `examples/`. The id in brackets at the end of an entry (`P0.1`, `B2`, …) is the item in the fork's implementation spec, the same vocabulary the `.xfail` markers under `tests/` use.
+
+### `=` reads velocity like `:` and `%`, and a velocity worth 0 sends nothing
+
+`=` mapped its velocity glyph as v × 127 / 35, while `:` and `%` use v × 8 − 1, at most 127, so one glyph played at two velocities: `f` was 54 on `=` and 119 on `:`. `=` also had no zero case: a velocity glyph worth 0 sent every note of the chord at velocity 0, which synths read as a note-off, and the real note-offs followed later. All three operators now share the mapping `:` and `%` always used, described under Note Velocity above: `.` is 127, a glyph worth 0 sends nothing, and any other value v gives v × 8 − 1, at most 127. This breaks patches that use `=`:
+
+- `=` plays louder for the same glyph: `1` went from 3 to 7, `7` from 25 to 55, and `f` from 54 to 119.
+- `g` to `z` all give 127 on `=`; before, they rose from 58 to 127.
+- `0`, or any other glyph worth 0 (`*`, `#`, `;` …), now sends nothing, where `=` used to send velocity-0 note-ons. Those cut off any of the chord's pitches still sounding on that channel; now those notes ring for their full length: `=13Caf8` at tick 0 then `=13Ca08` at tick 2 cut the chord at tick 2, and now it ends at tick 8.
+- The uConsole appliance's `default.orca` plays `=03C0ff`, which goes from 54 to 119, as loud as the `:03Ef4` beside it; `=03C07f` gives 55. Whether that project changes is decided when the appliance is repinned to this release.
+
+To keep an `=` near its old velocity, replace its velocity glyph with the new glyph below it in this table, which gives the nearest velocity; every old velocity lands within 4:
+
+```
+old =  1-3 4-5 6-7 8-9 a-c d-e f-g h-i j-k l-n o-p q-r s-t u-v w-y z
+new =  1   2   3   4   5   6   7   8   9   a   b   c   d   e   f   g
+```
+
+Ties (`c`, `n`, `y`) round down. `x` (119) maps exactly to the new `f`, and `z` and `.` stay 127. Where an operator writes the velocity (`R`, `T`, `C` …), rescale its range instead: the new velocity is about 8v and the old about 3.6v, so roughly halve it.
+
+`:` and `%` are unchanged: they already used this mapping, and a velocity worth 0 already sent nothing.
+
+Before → after, the repro cells with `cli --events -t 1`:
+
+```
+           before               after
+=13Caf1    36 40 43 at 54       36 40 43 at 119
+=13C0f1    36 40 43 48 at 54    36 40 43 48 at 119
+=13Ca01    36 40 43 at 0        nothing
+```
+
+Example: `examples/misc/velocity.orca`, which steps `:`, `%` and `=` together through the velocity glyphs `1`, `7`, `f`, `F`, `g` and `z`, at the same velocity on all three, beside an `=` at `0` that sends nothing; repro patch: `tests/patches/midichord_vel.orca`. (B5)
 
 ### Uppercase `$` and `=` selectors play first inversions
 

@@ -83,6 +83,23 @@ static U8 midi_note_number_of(Glyph g) {
   return (U8)(deg / 7 * 12 + (I8[]){0, 2, 4, 5, 7, 9, 11}[deg % 7] + sharp);
 }
 
+// The velocity of `:`, `%` and `=` (CAP-10). `.` is 127. The value comes
+// from index_of, which folds case (`F` is `f`) and ignores the top bit, so a
+// byte 0x80 or above reads like its low seven bits. A glyph worth 0, `0` or
+// any other glyph that is not 0-9, a-z or A-Z, returns 0: send no note. Any
+// other value v gives min(v * 8 - 1, 127), so `1` is 7, `f` 119 and `g` to
+// `z` 127. The test is on the value, not the glyph `'0'`: 0 * 8 - 1 would
+// wrap and clamp to 127.
+static U8 midi_velocity_of(Glyph g) {
+  if (g == '.')
+    return 127;
+  Usz v = index_of(g);
+  if (v == 0)
+    return 0;
+  v = v * 8 - 1;
+  return (U8)(v > 127 ? 127 : v);
+}
+
 typedef struct {
   Glyph *vars_slots;
   Oevent_list *oevent_list;
@@ -349,17 +366,9 @@ BEGIN_OPERATOR(midi)
   Usz channel_num = index_of(channel_g);
   if (channel_num > 15)
     channel_num = 15;
-  Usz vel_num;
-  if (velocity_g == '.') {
-    vel_num = 127;
-  } else {
-    vel_num = index_of(velocity_g);
-    if (vel_num == 0)
-      return;
-    vel_num = vel_num * 8 - 1;
-    if (vel_num > 127)
-      vel_num = 127;
-  }
+  U8 velocity = midi_velocity_of(velocity_g);
+  if (velocity == 0)
+    return;
   PORT(0, 0, OUT, "");
   Oevent_midi_note *oe =
       (Oevent_midi_note *)oevent_list_alloc_item(extra_params->oevent_list);
@@ -367,7 +376,7 @@ BEGIN_OPERATOR(midi)
   oe->channel = (U8)channel_num;
   oe->octave = octave_num;
   oe->note = note_num;
-  oe->velocity = (U8)vel_num;
+  oe->velocity = velocity;
   oe->duration = (U8)(index_of(length_g) & 0x7Fu);
   oe->mono = This_oper_char == '%' ? 1 : 0;
 END_OPERATOR
@@ -799,11 +808,10 @@ BEGIN_OPERATOR(midichord)
   Glyph velocity_g = PEEK(0, 5);
   Glyph length_g = PEEK(0, 6);
 
-  // Standardized velocity
-  U8 velocity =
-      (velocity_g == '.' ? 127 : (U8)(index_of(velocity_g) * 127 / 35));
-  if (velocity > 127)
-    velocity = 127;
+  // The velocity `:` and `%` use; a glyph worth 0 sends no chord.
+  U8 velocity = midi_velocity_of(velocity_g);
+  if (velocity == 0)
+    return;
 
   // Get initial octave
   int current_octave = (int)index_of(PEEK(0, 2));
