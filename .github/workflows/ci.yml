@@ -150,6 +150,76 @@ jobs:
           git diff --exit-code
           test -z "$(git status --porcelain)"
 
+      # B7's non-empty rule: every example outside examples/upstream/ sends an
+      # event or changes its grid in 64 ticks, or is one of the exceptions
+      # the script names; a crash or sanitizer report fails it.
+      - name: Every example does something (debug cli)
+        run: tests/check-examples.sh build/debug/cli
+
+      # The examples check's failure path: a throwaway dots-only example,
+      # which neither sends nor changes its grid, must fail it, naming the
+      # file. The file is removed and the tree must end clean. It uses the
+      # release cli, as the bad-marker step does, to keep the job short.
+      - name: Examples check rejects an example that does nothing (canary)
+        run: |
+          canary=examples/ci-canary.orca
+          log="$RUNNER_TEMP/examples_canary.log"
+          printf '.....\n.....\n' >"$canary"
+          status=0
+          tests/check-examples.sh build/cli >"$log" 2>&1 || status=$?
+          cat "$log"
+          if [ "$status" != 1 ] || ! grep -q "^FAIL   $canary " "$log"; then
+            echo "expected exit 1 with a FAIL line for $canary, got $status"
+            exit 1
+          fi
+          rm "$canary"
+          test -z "$(git status --porcelain)"
+
+      # The README's scale and chord tables, between its tables:begin and
+      # tables:end markers, must be exactly what readme-gen prints from
+      # music.h (spine AD-19).
+      - name: Build readme-gen
+        run: CFLAGS_EXTRA=-Werror ./tool build readme-gen
+
+      - name: README tables match readme-gen (doc-sync)
+        run: tests/check-doc-sync.sh build/readme-gen
+
+      # doc-sync's failure paths: a README copy with one table cell changed
+      # (the K row's root notes) must fail it, printing that row, and a copy
+      # with the end marker deleted must fail it as bad markers.
+      - name: Doc-sync rejects a changed table cell and a missing marker (canary)
+        run: |
+          copy="$RUNNER_TEMP/README.md"
+          log="$RUNNER_TEMP/doc_sync_canary.log"
+          sed 's/^|   k\/K   | Major9 | C-E-G-B-D |/|   k\/K   | Major9 | C-E-G-B-Db |/' README.md >"$copy"
+          if cmp -s README.md "$copy"; then
+            echo "the canary's sed changed nothing in the README copy"
+            exit 1
+          fi
+          status=0
+          tests/check-doc-sync.sh build/readme-gen "$copy" >"$log" 2>&1 || status=$?
+          cat "$log"
+          if [ "$status" != 1 ]; then
+            echo "expected exit 1 from doc-sync on the changed copy, got $status"
+            exit 1
+          fi
+          if ! grep -qF -e '-|   k/K   | Major9 | C-E-G-B-Db |' "$log"; then
+            echo "doc-sync did not print the changed row"
+            exit 1
+          fi
+          sed '/<!-- tables:end -->/d' README.md >"$copy"
+          if grep -qF '<!-- tables:end -->' "$copy"; then
+            echo "the canary's sed left the end marker in the README copy"
+            exit 1
+          fi
+          status=0
+          tests/check-doc-sync.sh build/readme-gen "$copy" >"$log" 2>&1 || status=$?
+          cat "$log"
+          if [ "$status" != 1 ] || ! grep -q 'FAIL  doc-sync: bad markers' "$log"; then
+            echo "expected exit 1 with bad markers from the copy without an end marker, got $status"
+            exit 1
+          fi
+
       # AD-2 and AD-1 over every file in ./tool sources core; the expected
       # failures are listed in tests/xfail/. They need no build, so they run
       # before the unit-test builds and a failing build cannot hide them.
@@ -389,7 +459,10 @@ jobs:
 
       # ubuntu-24.04 ships shellcheck (0.9.0); the arm image is not known to.
       - name: Shellcheck the build and test scripts
-        run: shellcheck -s sh tool tests/run.sh tests/check-includes.sh tests/check-nm.sh tests/check-debug-build.sh
+        run: >-
+          shellcheck -s sh tool tests/run.sh tests/check-includes.sh
+          tests/check-nm.sh tests/check-debug-build.sh tests/check-doc-sync.sh
+          tests/check-examples.sh tests/upstream/build-cli.sh
 
   # Optional compile-only check for 32-bit ARM (Pi Zero 2W), where Usz is
   # 32-bit. It calls the cross compiler directly instead of going through
@@ -415,16 +488,17 @@ jobs:
       - name: Toolchain versions
         run: arm-linux-gnueabihf-gcc --version | head -n 1
 
-      # The files are the union of tool's cli and test source lists, so they
-      # follow the shared CORE list. The lists are read before the loop, so a
-      # failing ./tool sources fails the step instead of compiling nothing.
-      # Every file is compiled even after a failure, so one run reports them
-      # all.
+      # The files are the union of tool's cli, test and readme-gen source
+      # lists, so they follow the shared CORE list. The lists are read before
+      # the loop, so a failing ./tool sources fails the step instead of
+      # compiling nothing. Every file is compiled even after a failure, so one
+      # run reports them all.
       - name: Compile each source for armhf
         run: |
           cli_files=$(./tool sources cli)
           test_files=$(./tool sources test)
-          files=$(printf '%s\n' "$cli_files" "$test_files" | awk 'NF && !seen[$0]++')
+          readme_gen_files=$(./tool sources readme-gen)
+          files=$(printf '%s\n' "$cli_files" "$test_files" "$readme_gen_files" | awk 'NF && !seen[$0]++')
           test -n "$files"
           status=0
           for f in $files; do

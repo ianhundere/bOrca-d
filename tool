@@ -8,14 +8,14 @@ Example:
     tool build --portmidi orca
 Commands:
     build <target>
-        Compiles the livecoding environment, the CLI tool or the unit-test
-        runner.
-        Targets: orca, cli, test
+        Compiles the livecoding environment, the CLI tool, the unit-test
+        runner or the README table generator.
+        Targets: orca, cli, test, readme-gen
         Output: build/<target>, or build/unit_tests for test
     sources <list>
         Prints the source files of a build target, one per line, or the
         shared CORE list of core modules that every target links.
-        Lists: core, cli, orca, test
+        Lists: core, cli, orca, test, readme-gen
     clean
         Removes build/
     info
@@ -263,8 +263,8 @@ build_dir=build
 # this line.
 core_sources='gbuffer.c vmio.c sim.c opstate.c ccout.c music.c tick.c'
 
-# set_target_sources <core|cli|orca|test>: sets source_files to CORE followed
-# by the target's own files. Returns 1 for an unknown name.
+# set_target_sources <core|cli|orca|test|readme-gen>: sets source_files to
+# CORE followed by the target's own files. Returns 1 for an unknown name.
 set_target_sources() {
   source_files=
   # Split on spaces intentionally; globbing is off (set -f).
@@ -273,6 +273,8 @@ set_target_sources() {
   case $1 in
     core) ;;
     cli) add source_files field.c events_print.c cli_main.c;;
+    # Prints README.md's scale and chord tables from music.h (spine AD-19).
+    readme-gen) add source_files tools/readme-gen.c;;
     orca|tui)
       add source_files field.c osc_out.c term_util.c sysmisc.c \
         thirdparty/oso.c tooltips.c tui_main.c
@@ -460,11 +462,14 @@ build_target() {
   esac
 
   case $1 in
-    cli|orca|tui|test) set_target_sources "$1";;
+    cli|orca|tui|test|readme-gen) set_target_sources "$1";;
   esac
   case $1 in
     cli)
       out_exe=cli
+    ;;
+    readme-gen)
+      out_exe=readme-gen
     ;;
     orca|tui)
       add cc_flags -D_XOPEN_SOURCE_EXTENDED=1
@@ -550,7 +555,7 @@ tests/unit/main.c
     ;;
     *)
       printf 'Unknown build target %s\nValid build targets: %s\n' \
-        "$1" 'orca, cli, test' >&2
+        "$1" 'orca, cli, test, readme-gen' >&2
       exit 1
     ;;
   esac
@@ -628,7 +633,7 @@ EOF
     test "$#" -gt 1 && fatal "Too many arguments for 'sources'"
     if ! set_target_sources "$1"; then
       printf 'Unknown source list %s\nValid source lists: %s\n' \
-        "$1" 'core, cli, orca, test' >&2
+        "$1" 'core, cli, orca, test, readme-gen' >&2
       exit 1
     fi
     # add leaves a leading newline, so print the split fields, not the

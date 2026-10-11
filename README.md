@@ -4,7 +4,7 @@ Orca is an [esoteric programming language](https://en.wikipedia.org/wiki/Esoteri
 
 This is the C implementation of the [ORCΛ](https://wiki.xxiivv.com/site/orca.html) language and terminal livecoding environment. It's designed to be power efficient. It can handle large files, even if your terminal is small.
 
-Orca is not a synthesizer, but a flexible livecoding environment capable of sending MIDI, OSC, and UDP to your audio/visual interfaces like Ableton, Renoise, VCV Rack, or SuperCollider.
+Orca is not a synthesizer, but a flexible livecoding environment capable of sending MIDI to your audio/visual interfaces like Ableton, Renoise, VCV Rack, or SuperCollider. This fork has no OSC or UDP operators (its `=` and `;` are the Midichord and Arpeggiator operators below). Its only OSC output is the `/orca/bpm`, `/orca/started` and `/orca/stopped` messages, sent to the address set under OSC Output in the main menu, and MIDI sent as OSC with `--osc-midi-bidule`.
 
 <img src='https://raw.githubusercontent.com/wiki/hundredrabbits/Orca-c/PREVIEW.jpg' width='600'/>
 
@@ -18,6 +18,8 @@ I'll try to add new operators based on my needs. I'm not a professional programm
 - Using it through SSH on a Raspberry Pi Zero 2W, connected to an iPad Pro 11", outputting MIDI data via USB, acting as a MIDI Gadget
 - Using it on my uConsole terminal, paired to a CME WIDI Jack via Bluetooth, which is connected to the MIDI ports of a Torso S4.
 
+The patches in `examples/upstream/` are upstream Orca-c examples for `--dialect upstream`, which a later release adds (spec item I1); see [`examples/upstream/README.md`](examples/upstream/README.md).
+
 ## Tooltip System
 This fork includes an enhanced tooltip system inspired by the original tooltip functionality found in the Elektron version of ORCA. When positioning the cursor over operator input ports, contextual tooltips appear in the bottom-right corner of the screen showing parameter names like "Channel", "Octave", "Velocity", etc. This makes learning and using operators much more intuitive, especially for complex operators with multiple inputs. The tooltip system works across all operators and provides immediate feedback about what each port represents without needing to reference documentation.
 
@@ -28,7 +30,7 @@ Outputs note and octave based on the provided root note, scale/chord type, and d
 |:------:|:--------:|:--------:|:-----:|:------:|
 |   $    |    O     |    R     |   S   |   D    |
 
-**Output:** The Scale operator outputs the octave above the operator and the note to the right of the operator.
+**Output:** The Scale operator outputs the octave below and to the left of the operator, and the note directly below it. With no octave input (`.`), it outputs only the note.
 
 ### Scale Examples (0-9):
 - `$3C02` - C Major scale, 3rd degree → outputs octave '3' and note 'E'
@@ -144,15 +146,15 @@ The operator reduces complexity by requiring only 2 inputs (pattern and range) w
 
 ### Inputs
 
-| Range | Operator | Pattern |
-|:-----:|:--------:|:-------:|
-|   R   |    ;     |    P    |
+| Operator | Range | Pattern |
+|:--------:|:-----:|:-------:|
+|    ;     |   R   |    P    |
 
 - `R`: Range (1-4) - Sets the octave range for arpeggiation
 - `P`: Pattern (0-9, a-d) - Selects the arpeggiation pattern
 
 ### Output
-- Outputs degree numbers to the right of the operator
+- Outputs degree numbers directly below the operator
 
 ### Example
 
@@ -160,7 +162,7 @@ The operator reduces complexity by requiring only 2 inputs (pattern and range) w
 .............
 .......D2....
 ........;12..
-....$3C03....
+D2..$3C03....
 .:03Fa8......
 .............
 ```
@@ -169,7 +171,7 @@ This example:
 1. Delay (`D`) with value 2 bangs the arpeggiator every 2 ticks
 2. Arpeggiator (`;`) uses range 1, pattern 2 (Up-Down) 
 3. Scale operator (`$`) converts degrees to notes using octave 3, C major scale, degree received from Arpeggiator
-4. MIDI operator (`:`) plays the notes on channel 0 with velocity a, duration 8
+4. MIDI operator (`:`), banged from the west by a second `D2` every 2 ticks, plays the notes on channel 0 with velocity a, duration 8
 
 ### Arpeggio Patterns
 
@@ -279,6 +281,24 @@ The operator automatically clamps control numbers above 127 to 127 to ensure val
 
 ## Building
 
+On Debian or Ubuntu, install a C compiler and ncurses, plus the library of one MIDI backend: PortMidi, or ALSA on Linux.
+
+```sh
+sudo apt install build-essential libncurses-dev libportmidi-dev   # for PortMidi
+sudo apt install build-essential libncurses-dev libasound2-dev    # or for ALSA, Linux only
+```
+
+Then clone the fork (its `main` branch is bOrca's release line from v1.0.0), build it with the backend you installed, and run it:
+
+```sh
+git clone https://github.com/ianhundere/bOrca-d.git
+cd bOrca-d
+./tool build --portmidi orca   # or: ./tool build --alsa orca
+build/orca examples/misc/chord.orca
+```
+
+Space starts and pauses playback, Ctrl+D opens the main menu and Ctrl+G lists the operators. A PortMidi build picks its output under MIDI Output... in the main menu; an ALSA build's `MIDI out` port is connected with `aconnect` (below).
+
 `tool`, a POSIX `sh` script, builds everything; `./tool help` lists every option. It needs a C99 compiler and, for the livecoding environment, ncursesw (Debian and Ubuntu: `libncurses-dev`).
 
 ```sh
@@ -288,6 +308,7 @@ The operator automatically clamps control numbers above 127 to 127 to ensure val
 ./tool build -d orca           # debug build with ASan and UBSan: build/debug/orca
 ./tool build cli               # headless interpreter: build/cli
 ./tool build test              # unit tests: build/unit_tests, see tests/README.md
+./tool build readme-gen        # prints the scale and chord tables above: build/readme-gen
 ```
 
 `--alsa` cannot be combined with `--portmidi` or `--static`, and fails on anything but Linux. An `--alsa` build opens one ALSA sequencer client when it starts, named `bOrca`, or the value of `BORCA_ALSA_CLIENT_NAME` when that is set and non-empty, with one output port, `MIDI out`, that other programs subscribe to (`aconnect -l` lists it). It has no MIDI input. The client opens even with `--osc-midi-bidule`, whose output then replaces it, so such a run also needs a sequencer and, while another `bOrca` runs, its own client name. If the sequencer cannot be opened, or another client already has the name (checked once, at startup: when restarting `orca` by hand, wait for the old instance to exit), `orca` prints an error and exits with status 1 before the screen starts; two clients with one name would make the uConsole appliance's router refuse to route either. A MIDI message the sequencer does not take is dropped, never retried, and the HUD's first line then shows a bold `MIDI err` until you quit. SIGTERM, SIGHUP or SIGINT quits cleanly, stopping playback first, unless that signal was already ignored when `orca` started. `orca -h` repeats this in an `--alsa` build.
@@ -302,6 +323,8 @@ make debug       # ./tool build -d --portmidi orca
 make appliance   # ./tool build --alsa --harden --pie orca, Linux only: the uConsole appliance build
 make clean       # removes build/
 ```
+
+On the uConsole, the appliance is built with `make appliance`: ALSA only, so it needs `libasound2-dev` and never PortMidi. A development `--alsa` build started while the appliance's engine runs needs its own ALSA client name, or it exits at startup because `bOrca` is taken; run it as `BORCA_ALSA_CLIENT_NAME=bOrca-dev build/orca`.
 
 ## Changelog
 

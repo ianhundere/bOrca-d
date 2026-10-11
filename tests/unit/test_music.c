@@ -342,8 +342,8 @@ void test_music_inversion_sorts_12(void) {
 }
 
 // A glyph that is not 0-9, a-z or A-Z decodes as scale 0 for `$` and as
-// enriched chord 0 for `=`, as before B2, and has no name. The io.orca
-// cells ($pg:a, =aGA.) are included.
+// enriched chord 0 for `=`, as before B2, and has no name. The cells of
+// tests/patches/io_borca.orca ($pg:a, =aGA.) are included.
 void test_music_other_glyphs(void) {
   static Glyph const others[] = {'*', ':', '.', '#', '=', '$', '!', '?'};
   for (Usz i = 0; i < ORCA_ARRAY_COUNTOF(others); ++i) {
@@ -362,14 +362,14 @@ void test_music_other_glyphs(void) {
   CHECK(chord_plays("=13C*.1", 4, (U8 const[]){36, 40, 43, 48}));
   CHECK(chord_plays("=13C..1", 4, (U8 const[]){36, 40, 43, 48}));
 
-  // io.orca's $pg:a: octave p clamps to 9, root g is G#, and degree a (10)
-  // of scale 0 is a step past the octave, so the note lands in octave 11 and
-  // `$` writes nothing.
+  // io_borca.orca's $pg:a: octave p clamps to 9, root g is G#, and degree
+  // a (10) of scale 0 is a step past the octave, so the note lands in octave
+  // 11 and `$` writes nothing.
   Glyph octave_g, note_g;
   CHECK(scale_out("$pg:a", &octave_g, &note_g) == -1);
   CHECK(octave_g == '.' && note_g == '.');
-  // io.orca's =aGA.: channel 10, octave G clamps to 9, root A (117), and
-  // enriched chord 0's last note, 129, is above 127 and skipped.
+  // io_borca.orca's =aGA.: channel 10, octave G clamps to 9, root A (117),
+  // and enriched chord 0's last note, 129, is above 127 and skipped.
   Note notes[Notes_max];
   CHECK(chord_out("=aGA...", notes) == 3);
   CHECK(notes[0].channel == 10 && notes[0].midi == 117);

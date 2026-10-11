@@ -1,0 +1,115 @@
+bOrca's golden-test options for upstream Orca-c's cli, against Orca-c
+9df9786e2ad3c01955cdf4cdd5ae1fffad8fa5cc (architecture spine AD-21). It adds
+only --events and --seed, with the same output and parsing as bOrca's cli,
+and links bOrca's events_print.c, which tests/upstream/build-cli.sh copies
+into the tree before applying this patch with `patch -p1`.
+
+--- a/cli_main.c
++++ b/cli_main.c
+@@ -1,8 +1,10 @@
+ #include "base.h"
++#include "events_print.h"
+ #include "field.h"
+ #include "gbuffer.h"
+ #include "sim.h"
+ #include "vmio.h"
++#include <errno.h>
+ #include <getopt.h>
+ 
+ static ORCA_NOINLINE void usage(void) { // clang-format off
+@@ -13,17 +15,43 @@
+ "                  Must be 0 or a positive integer.\n"
+ "                  Default: 1\n"
+ "    -q or --quiet Don't print the result to stdout.\n"
++"    --events      After each tick, print that tick's output events, one\n"
++"                  per line (NOTE, CC, PB, OSC, UDP, each prefixed\n"
++"                  t<tick>), then 't<tick> GRID' and the grid. With -q,\n"
++"                  print the event lines only.\n"
++"    --seed <n>    Seed for the random operators. Default: 0\n"
+ "    -h or --help  Print this message and exit.\n"
+ );} // clang-format on
+ 
++// bOrca's golden-test options (bOrca tests/upstream/): --events prints each
++// tick's events through bOrca's events_print.c, and --seed is parsed as
++// bOrca's cli parses it: digits only, no sign, no trailing text, no overflow.
++enum { Argopt_events = UCHAR_MAX + 1, Argopt_seed };
++
++static bool parse_seed(char const *s, Usz *out) {
++  if (s[0] < '0' || s[0] > '9')
++    return false;
++  errno = 0;
++  char *end = NULL;
++  unsigned long long v = strtoull(s, &end, 10);
++  if (*end != '\0' || errno == ERANGE || (unsigned long long)(Usz)v != v)
++    return false;
++  *out = (Usz)v;
++  return true;
++}
++
+ int main(int argc, char **argv) {
+   static struct option cli_options[] = {{"help", no_argument, 0, 'h'},
+                                         {"quiet", no_argument, 0, 'q'},
++                                        {"events", no_argument, 0, Argopt_events},
++                                        {"seed", required_argument, 0, Argopt_seed},
+                                         {NULL, 0, NULL, 0}};
+ 
+   char *input_file = NULL;
+   int ticks = 1;
+   bool print_output = true;
++  bool print_events = false;
++  Usz seed = 0;
+ 
+   for (;;) {
+     int c = getopt_long(argc, argv, "t:qh", cli_options, NULL);
+@@ -43,6 +71,18 @@
+     case 'q':
+       print_output = false;
+       break;
++    case Argopt_events:
++      print_events = true;
++      break;
++    case Argopt_seed:
++      if (!parse_seed(optarg, &seed)) {
++        fprintf(stderr,
++                "Bad seed argument %s.\n"
++                "Must be 0 or a positive integer.\n",
++                optarg);
++        return 1;
++      }
++      break;
+     case 'h':
+       usage();
+       return 0;
+@@ -89,11 +129,19 @@
+     mbuffer_clear(mbuf_r.buffer, field.height, field.width);
+     oevent_list_clear(&oevent_list);
+     orca_run(field.buffer, mbuf_r.buffer, field.height, field.width, i,
+-             &oevent_list, 0);
++             &oevent_list, seed);
++    if (print_events) {
++      events_print(stdout, i, oevent_list.buffer, oevent_list.count);
++      if (print_output) {
++        printf("t%zu GRID\n", i);
++        field_fput(&field, stdout);
++      }
++    }
+   }
+   mbuf_reusable_deinit(&mbuf_r);
+   oevent_list_deinit(&oevent_list);
+-  if (print_output)
++  // With --events every tick already printed its grid.
++  if (print_output && !print_events)
+     field_fput(&field, stdout);
+   field_deinit(&field);
+   return 0;
+--- a/tool
++++ b/tool
+@@ -331,7 +331,7 @@
+   add source_files gbuffer.c field.c vmio.c sim.c
+   case $1 in
+     cli)
+-      add source_files cli_main.c
++      add source_files cli_main.c events_print.c
+       out_exe=cli
+     ;;
+     orca|tui)

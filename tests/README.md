@@ -28,6 +28,10 @@ case is PASS or XFAIL and no expected file is orphaned.
 | `examples/<dir>/<name>.orca` (referenced in place, never copied) | `tests/expected/examples/<dir>/<name>.events` | `<name>.args`, `<name>.xfail` |
 | `tests/patches/<name>.orca` (repro patches) | `tests/expected/patches/<name>.events` | `<name>.args`, `<name>.xfail` |
 
+`examples/upstream/<dir>/<name>.orca` follows the first row: its expected
+files sit under `tests/expected/examples/upstream/<dir>/` (see
+[Upstream examples](#upstream-examples)).
+
 - `<name>.args` holds extra flags appended after the defaults; a later flag
   wins, so `-t 1` in a sidecar overrides the default `-t 64`.
 - `<name>.xfail` names the one spec item whose fix the case waits for:
@@ -41,7 +45,8 @@ case is PASS or XFAIL and no expected file is orphaned.
   `--update` never rewrites that case's expected file, and the other cases
   still run.
 - A marker never hides a crash. A sanitizer report in the output, a signal or
-  the 60 s per-case timeout fails the run whatever the marker says, so the
+  the 60 s per-case timeout (applied when `timeout(1)` is on `PATH`) fails
+  the run whatever the marker says, so the
   debug build must stay clean on every case. A plain non-zero exit (such as a
   rejected flag) counts as a mismatch and may be marked.
 - An expected file or sidecar whose input no longer exists under `examples/`
@@ -137,6 +142,135 @@ B1 its output differed between builds, because the overflow read whatever
 lay past the array. It builds the 300×80 grid in memory, runs 256 ticks
 under the debug runner's ASan and UBSan, and checks that every `&` outputs
 what a lone in-range one does.
+
+### Upstream examples
+
+The five patches in `examples/upstream/` (`basics/_osc`, `basics/_udp`,
+`benchmarks/io`, `misc/udp+loop` and `setups/knobs`) are upstream Orca-c
+examples, byte-identical to Orca-c `9df9786`'s and at its relative paths
+(`examples/upstream/README.md`). They use upstream's OSC, UDP and CC
+operators, which bOrca's dialect replaces, so they wait for
+`--dialect upstream`, which I1 adds. Each has three files under
+`tests/expected/examples/upstream/<dir>/`:
+
+- `<name>.events`: Orca-c `9df9786`'s own `cli --events -t 96 --seed 0`
+  output. It is 96 ticks long because CAP-13 compares 96 ticks against
+  Orca-c, so these are the goldens I1 flips;
+- `<name>.args`: `-t 96 --dialect upstream`;
+- `<name>.xfail`: `I1`.
+
+Until I1, `cli` rejects `--dialect upstream` and exits 1, so each case
+reports `XFAIL … (waiting for I1)`; I1 deletes the markers when its output
+matches, and an XPASS before then fails the run.
+
+The goldens come from an Orca-c build that `tests/upstream/` holds, and that
+I1 reuses in CI for its byte-identity check:
+
+- `orca-c-cli.patch` adds `--events` and `--seed` to Orca-c's `cli_main.c`,
+  with the output and parsing of bOrca's `cli`, and `events_print.c` to the
+  `cli` sources in Orca-c's `tool`;
+- `build-cli.sh` gets Orca-c at `9df9786e2ad3c01955cdf4cdd5ae1fffad8fa5cc`
+  with `git archive`: from this repository when it has the commit (as when
+  the `upstream` remote, hundredrabbits/Orca-c, is fetched), or else from a
+  depth-1 fetch of that commit by URL from
+  `https://github.com/hundredrabbits/Orca-c.git` into
+  `build/upstream/orca-c.git`, which later runs reuse. It extracts the tree
+  to `build/upstream/orca-c/`, copies this repository's `events_print.c` and
+  `events_print.h` into it, so both `cli`s print through one file, applies
+  the patch with `patch -p1`, and builds `build/upstream/cli` with Orca-c's
+  own `tool`. It needs git, tar, patch and a C compiler.
+
+To rebuild the Orca-c `cli` and check every golden against it (write with
+`>` instead of `cmp` to remake one); the last line fails, with status 1,
+if any golden differs:
+
+```sh
+nice -n 19 taskset -c 0-2 tests/upstream/build-cli.sh
+status=0
+for rel in basics/_osc basics/_udp benchmarks/io misc/udp+loop setups/knobs; do
+  nice -n 19 taskset -c 0-2 build/upstream/cli --events -t 96 --seed 0 \
+    "examples/upstream/$rel.orca" |
+    cmp - "tests/expected/examples/upstream/$rel.events" || status=1
+done
+test "$status" = 0
+```
+
+`benchmarks/io` drives `:`, `!`, `;`, `=`, `?` and `$` from clocked tracks.
+Its bOrca-dialect coverage stays in `tests/patches/io_borca.orca`, a copy of
+the patch, whose `tests/expected/patches/io_borca.events` is the golden
+`benchmarks/io` had before the move, unchanged.
+
+## README tables and examples
+
+### readme-gen and doc-sync
+
+`tools/readme-gen.c` prints the Markdown between `README.md`'s
+`<!-- tables:begin -->` and `<!-- tables:end -->` markers: the scale, chord
+and enriched-chord tables, with their headings and header rows and one blank
+line between tables (spine AD-19). It reads `music.h` only through
+`music_selector_name` and `music_decode` and copies no table, so the README
+cannot drift from what `$` and `=` play. Note names come from one spelling
+map per table: C Db D Eb E F Gb G G# A Bb B for 0 to 11, continuing an
+octave up. The maps differ at 15, which is D# in the chord table (Dom7#9) and
+Eb in the enriched table (Minor7+Oct3rd). A semitone outside its map, a
+selector with no name or a failed write exits 1. `./tool build readme-gen`
+builds CORE plus that file into `build/readme-gen` (`build/debug/readme-gen`
+with `-d`).
+
+`tests/check-doc-sync.sh <readme-gen> [README]` (the README defaults to the
+repository's) requires exactly one line of each marker, each alone on its
+line and begin first, and rejects a readme-gen run that fails or prints
+nothing. It then `diff -u`s the lines between the markers (`-`) with
+readme-gen's output (`+`), and exits 0 only when they are identical; 1 for a
+difference or any of the failures above, 2 on usage. After a change to the
+tables in `music.c`, replace the lines between the markers with
+`build/readme-gen`'s output.
+
+```sh
+CFLAGS_EXTRA=-Werror nice -n 19 taskset -c 0-2 ./tool build readme-gen
+tests/check-doc-sync.sh build/readme-gen
+```
+
+### Non-empty check of the examples
+
+`tests/check-examples.sh <cli>` runs every `examples/**/*.orca` outside
+`examples/upstream/` through `cli --events -t 64 --seed 0`, and requires each
+to do something in bOrca's dialect (`amendments.md` B7):
+
+- a file that contains an event operator glyph (`!`, `%`, `:`, `=` or `?`,
+  anywhere in the file) passes on at least one event line;
+- any other file passes on at least one tick whose grid differs from the
+  file as loaded, which is the grid `cli -t 0 <file>` prints (it adds the
+  final newline that many example files lack).
+
+Six named exceptions fail that rule on purpose. The script lists each with
+its reason, reports it as EXCEPT, and they stay byte-identical to upstream
+Orca-c's examples:
+
+| Exception | Why it fails the rule |
+| --- | --- |
+| `examples/basics/a.orca` | its `A` outputs already hold their sums, so no tick changes the grid |
+| `examples/basics/k.orca` | its `K` outputs already hold the variables, so no tick changes the grid |
+| `examples/basics/l.orca` | its `L` outputs already hold the lesser inputs, so no tick changes the grid |
+| `examples/misc/multiplication.orca` | its `K` and `O` outputs already hold their values, so no tick changes the grid |
+| `examples/misc/colors.orca` | its `:` is never banged (and is a locked `$` input), so it sends nothing |
+| `examples/setups/sequencer.orca` | an empty template: its `:` are banged every tick, but every note input is empty, so it sends nothing |
+
+Any other failing file fails the run. So does a listed exception that
+passes, or that names a missing file or one under `examples/upstream/`, so
+the list cannot go stale. A non-zero `cli` exit, a sanitizer report, a
+signal or the 60 s per-run timeout (applied when `timeout(1)` is on `PATH`)
+fails the file, exception or not, as does output that is not 64 ticks of
+event lines and grids. The script exits 0 only when every file passes or is
+a listed exception. An example run, with B7's examples:
+
+```text
+$ nice -n 19 taskset -c 0-2 tests/check-examples.sh build/debug/cli
+PASS   examples/basics/_midi.orca (26 event lines)
+EXCEPT examples/basics/a.orca (no grid change: its A outputs already hold their sums, so no tick changes the grid)
+…
+examples check: 44 files, 38 pass, 6 exceptions, 0 fail
+```
 
 ## Unit tests and core checks
 
@@ -368,17 +502,24 @@ Each `--portmidi` or `--alsa` test build overwrites
   first checks that `CFLAGS_EXTRA` reaches the compiler, then builds the
   debug and release `cli` with `CFLAGS_EXTRA=-Werror`, checks the debug
   `cli` with `tests/check-debug-build.sh`, and runs the golden suite on
-  both. It then runs `tests/check-includes.sh` and `tests/check-nm.sh`,
+  both. It runs `tests/check-examples.sh` on the debug `cli`, builds
+  `readme-gen` with `-Werror` and runs `tests/check-doc-sync.sh` on it. It
+  then runs `tests/check-includes.sh` and `tests/check-nm.sh`,
   which need no build, builds and runs the debug unit tests without and
   with `--portmidi` and with `--alsa` (ASan, UBSan with `halt_on_error=1`;
   the `--portmidi` run fails unless it prints
   `ok portmidi_error_text_and_filters`, the `--alsa` run unless it prints
   `ok alsa_version_and_open_modes`), and runs
   `tests/check-debug-build.sh` on each runner with its log before the next
-  build replaces it. Three steps prove the checks' failure paths on every
+  build replaces it. Five steps prove the checks' failure paths on every
   run: `tests/run.sh` must fail a throwaway `pitch_bend.xfail` holding
   `TODO`, then `B2 B5`, as a bad marker, and `--update` must leave an
   edited `pitch_bend.events` alone, after which the tree must be clean;
+  `tests/check-examples.sh` must exit 1 with a FAIL line for a throwaway
+  dots-only `examples/ci-canary.orca`, after which the tree must be clean;
+  `tests/check-doc-sync.sh` must exit 1 on a README copy under
+  `$RUNNER_TEMP` whose `k/K` row has one cell changed, printing that row,
+  and on one with its end marker deleted, as bad markers;
   `tests/check-debug-build.sh` must exit 1 on a program built with plain
   `cc`, naming both sanitizers; and a debug runner built with
   `-DUNIT_TESTS_UNREGISTERED_CANARY`, which defines
@@ -398,10 +539,14 @@ Each `--portmidi` or `--alsa` test build overwrites
   `cli`, and the release unit tests, both built with `-funsigned-char`;
   checks that a release runner built with `-DUNIT_TESTS_CANARY` exits 1 and
   prints `FAIL unit_check_canary:`; and runs
-  `shellcheck -s sh tool tests/run.sh tests/check-includes.sh tests/check-nm.sh tests/check-debug-build.sh`.
+  `shellcheck -s sh` over `tool`, `tests/run.sh`, `tests/check-includes.sh`,
+  `tests/check-nm.sh`, `tests/check-debug-build.sh`,
+  `tests/check-doc-sync.sh`, `tests/check-examples.sh` and
+  `tests/upstream/build-cli.sh`.
 - **armhf** (`ubuntu-24.04`, optional): only cross-compiles, with
-  `arm-linux-gnueabihf-gcc`, each file in the union of `./tool sources cli`
-  and `./tool sources test`; a red result does not fail the run.
+  `arm-linux-gnueabihf-gcc`, each file in the union of `./tool sources cli`,
+  `./tool sources test` and `./tool sources readme-gen`; a red result does
+  not fail the run.
 
 `tool` adds `CFLAGS_EXTRA` after its own compiler flags, split on spaces. To
 reproduce a red `build` or `unsigned-char` step on the uConsole:
@@ -412,6 +557,9 @@ nice -n 19 taskset -c 0-2 tests/check-debug-build.sh build/debug/cli
 nice -n 19 taskset -c 0-2 tests/run.sh build/debug/cli
 CFLAGS_EXTRA=-Werror nice -n 19 taskset -c 0-2 ./tool build cli
 nice -n 19 taskset -c 0-2 tests/run.sh build/cli
+nice -n 19 taskset -c 0-2 tests/check-examples.sh build/debug/cli
+CFLAGS_EXTRA=-Werror nice -n 19 taskset -c 0-2 ./tool build readme-gen
+tests/check-doc-sync.sh build/readme-gen
 nice -n 19 taskset -c 0-2 tests/check-includes.sh
 nice -n 19 taskset -c 0-2 tests/check-nm.sh
 CFLAGS_EXTRA=-Werror nice -n 19 taskset -c 0-2 ./tool build -d test
