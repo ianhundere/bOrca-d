@@ -177,6 +177,60 @@ jobs:
           rm "$canary"
           test -z "$(git status --porcelain)"
 
+      # The upstream dialect against Orca-c 9df9786 itself (CAP-13, spine
+      # AD-21). build-cli.sh builds Orca-c's cli with --events and --seed,
+      # fetching the commit by URL, since the checkout is shallow. compare.sh
+      # checks that the two events_print copies are one file, runs all 43
+      # of Orca-c's examples through both cli for 96 ticks (bOrca's with
+      # --dialect upstream) and fails on any byte difference or if fewer
+      # than 43 ran, and checks that the upstream goldens and examples and
+      # the six named exceptions are still Orca-c's.
+      - name: Build Orca-c 9df9786's cli
+        run: tests/upstream/build-cli.sh
+
+      - name: Upstream dialect matches Orca-c on its 43 examples (debug cli)
+        run: tests/upstream/compare.sh build/debug/cli
+
+      - name: Upstream dialect matches Orca-c on its 43 examples (release cli)
+        run: tests/upstream/compare.sh build/cli
+
+      # The comparison's failure path: the release cli with --dialect borca
+      # appended (a later flag wins) must fail it, naming _osc.orca.
+      - name: Upstream comparison rejects bOrca's dialect (canary)
+        run: |
+          wrapper="$RUNNER_TEMP/cli-borca-dialect"
+          log="$RUNNER_TEMP/upstream_canary.log"
+          printf '#!/bin/sh\nexec "%s" "$@" --dialect borca\n' \
+            "$PWD/build/cli" >"$wrapper"
+          chmod +x "$wrapper"
+          status=0
+          tests/upstream/compare.sh "$wrapper" >"$log" 2>&1 || status=$?
+          cat "$log"
+          if [ "$status" != 1 ] ||
+            ! grep -q '^FAIL  examples/basics/_osc.orca ' "$log"; then
+            echo "expected exit 1 with a FAIL line for examples/basics/_osc.orca, got $status"
+            exit 1
+          fi
+
+      # The golden and file checks' failure path: one upstream golden with a
+      # byte appended must fail compare.sh, naming it. The golden is
+      # restored and the tree must end clean.
+      - name: Upstream comparison rejects a changed upstream golden (canary)
+        run: |
+          golden=tests/expected/examples/upstream/basics/_osc.events
+          log="$RUNNER_TEMP/upstream_golden_canary.log"
+          printf 'x' >>"$golden"
+          status=0
+          tests/upstream/compare.sh build/cli >"$log" 2>&1 || status=$?
+          cat "$log"
+          git checkout -- "$golden"
+          if [ "$status" != 1 ] ||
+            ! grep -q "^FAIL  $golden " "$log"; then
+            echo "expected exit 1 with a FAIL line for $golden, got $status"
+            exit 1
+          fi
+          test -z "$(git status --porcelain)"
+
       # The README's scale and chord tables, between its tables:begin and
       # tables:end markers, must be exactly what readme-gen prints from
       # music.h (spine AD-19).
@@ -420,6 +474,25 @@ jobs:
           fi
           exit "$status"
 
+      # orca takes --dialect borca or upstream only; any other value exits 1
+      # with its error on stderr, before curses starts and before the ALSA
+      # client opens (CAP-13).
+      - name: orca rejects a bad --dialect value
+        run: |
+          err="$RUNNER_TEMP/orca_bad_dialect.err"
+          status=0
+          build/orca --dialect foo </dev/null >/dev/null 2>"$err" || status=$?
+          cat "$err"
+          if [ "$status" != 1 ]; then
+            echo "expected exit 1 from orca --dialect foo, got $status"
+            exit 1
+          fi
+          if ! grep -q '^Bad dialect argument: foo$' "$err" ||
+            ! grep -q '^Must be borca or upstream\.$' "$err"; then
+            echo "orca did not report the bad --dialect value"
+            exit 1
+          fi
+
   # The goldens were captured on arm64, where gcc treats plain char as
   # unsigned; the x86_64 build leg above checks signed char against them.
   # This job checks the release cli built with unsigned char on x86_64.
@@ -465,6 +538,7 @@ jobs:
           shellcheck -s sh tool tests/run.sh tests/check-includes.sh
           tests/check-nm.sh tests/check-debug-build.sh tests/check-doc-sync.sh
           tests/check-examples.sh tests/upstream/build-cli.sh
+          tests/upstream/compare.sh
 
   # Optional compile-only check for 32-bit ARM (Pi Zero 2W), where Usz is
   # 32-bit. It calls the cross compiler directly instead of going through

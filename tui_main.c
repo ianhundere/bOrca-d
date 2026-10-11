@@ -72,6 +72,16 @@ fprintf(stderr,
 "                           cell seeds its own shuffle from it) and for\n"
 "                           the random pattern (c) of ;.\n"
 "                           Default: 1\n"
+"    --dialect <name>       Set the operator dialect for this session:\n"
+"                           borca (bOrca's operators) or upstream\n"
+"                           (upstream Orca-c's: ! sends a plain CC, ;\n"
+"                           UDP, = OSC, r is a banged R, $ and & do\n"
+"                           nothing). Overrides the dialect saved in\n"
+"                           orca.conf without changing it; the Operator\n"
+"                           Dialect menu changes and saves it. Picking\n"
+"                           the active dialect there saves nothing, so to\n"
+"                           save this one, pick the other, then this.\n"
+"                           Default: the saved dialect, else borca\n"
 "    -h or --help           Print this message and exit.\n"
 "\n"
 "OSC/MIDI options:\n"
@@ -769,7 +779,11 @@ staticni void draw_oevent_list(WINDOW *win, Oevent_list const *oevent_list) {
       break;
     }
     case Oevent_type_udp_string: {
-      // Nothing in the bOrca dialect emits UDP; the upstream dialect restores it.
+      Oevent_udp_string const *eo = &ev->udp_string;
+      wprintw(win, "UDP\tcount %d\t", (int)eo->count);
+      for (Usz j = 0; j < (Usz)eo->count; ++j) {
+        waddch(win, (chtype)eo->chars[j]);
+      }
       break;
     }
     }
@@ -1166,6 +1180,9 @@ typedef struct {
   // with a copy of opstate before each pass (AD-7).
   Opstate_store opstate;
   Opstate_store scratch_opstate;
+  // The operator list every VM run uses: ticks, step-forward and the
+  // preview (spine AD-18). Changed only through ged_set_dialect.
+  Orca_dialect dialect;
   Field clipboard_field;
   Mbuf_reusable mbuf_r;
   Undo_history undo_hist;
@@ -1218,11 +1235,29 @@ static void ged_set_bpm(Ged *a, Usz bpm) {
   a->tick_len = tick_len_us(bpm);
 }
 
+// Every change of the operator dialect goes through here (spine AD-6), from
+// the menu, orca.conf or --dialect, playing or not. The per-cell state
+// belongs to the old list's operators, so the store is cleared, as Ctrl+R
+// clears it; running CC glides stop and keep the last values sent; and the
+// grid is re-marked under the new list. Returns false, changing nothing,
+// when d is already the dialect.
+static bool ged_set_dialect(Ged *a, Orca_dialect d) {
+  if (d == a->dialect)
+    return false;
+  a->dialect = d;
+  opstate_clear(&a->opstate);
+  ccout_cancel(&a->ccout);
+  a->needs_remarking = true;
+  a->is_draw_dirty = true;
+  return true;
+}
+
 static void ged_init(Ged *a, Usz undo_limit, Usz init_bpm, Usz init_seed) {
   field_init(&a->field);
   field_init(&a->scratch_field);
   opstate_init(&a->opstate);
   opstate_init(&a->scratch_opstate);
+  a->dialect = Orca_dialect_borca;
   field_init(&a->clipboard_field);
   mbuf_reusable_init(&a->mbuf_r);
   undo_history_init(&a->undo_hist, undo_limit);
@@ -1379,9 +1414,15 @@ static void ged_sink_osc(void *u, Oevent const *e) {
     oosc_send_int32s(a->oosc_dev, path, ints, nnum);
     break;
   }
-  case Oevent_type_udp_string:
-    // Nothing in the bOrca dialect emits UDP; the upstream dialect restores it.
+  case Oevent_type_udp_string: {
+    // The upstream dialect's ; (sim.c udp): the glyphs as one datagram, to
+    // the OSC output's address and port.
+    if (!a->oosc_dev)
+      break;
+    Oevent_udp_string const *eu = &e->udp_string;
+    oosc_send_datagram(a->oosc_dev, eu->chars, eu->count);
     break;
+  }
   case Oevent_type_midi_note:
   case Oevent_type_midi_cc:
   case Oevent_type_midi_cc_interpolated:
@@ -1531,6 +1572,7 @@ staticni void ged_do_stuff(Ged *a) {
                         .width = a->field.width,
                         .random_seed = a->random_seed,
                         .opstate = &a->opstate,
+                        .dialect = a->dialect,
                         .tick_num = &a->tick_num,
                         .tick_list = &a->oevent_list,
                         .engine_list = &a->engine_oevent_list,
@@ -1640,9 +1682,11 @@ staticni void ged_draw(Ged *a, WINDOW *win, char const *filename,
     // allocate, it runs on an empty store; the live one is untouched.
     (void)opstate_copy(&a->opstate, &a->scratch_opstate);
     // Its events go to the preview list, which is never sent (AD-12).
+    Orca_run_ctx const preview_ctx = {.opstate = &a->scratch_opstate,
+                                      .dialect = a->dialect};
     tick_run_vm(a->scratch_field.buffer, a->mbuf_r.buffer, a->field.height,
                 a->field.width, a->tick_num, &a->scratch_oevent_list,
-                a->random_seed, &a->scratch_opstate);
+                a->random_seed, &preview_ctx);
     a->needs_remarking = false;
   }
   int win_w = a->win_w;
@@ -2099,17 +2143,20 @@ staticni void ged_input_cmd(Ged *a, Ged_input_cmd ev) {
                         : Ged_input_mode_slide;
     a->is_draw_dirty = true;
     break;
-  case Ged_input_cmd_step_forward:
+  case Ged_input_cmd_step_forward: {
     undo_history_push(&a->undo_hist, &a->field, a->tick_num);
     // The VM only, into the tick list: nothing is sent and no note ages.
+    Orca_run_ctx const step_ctx = {.opstate = &a->opstate,
+                                   .dialect = a->dialect};
     tick_run_vm(a->field.buffer, a->mbuf_r.buffer, a->field.height,
                 a->field.width, a->tick_num, &a->oevent_list, a->random_seed,
-                &a->opstate);
+                &step_ctx);
     ++a->tick_num;
     a->activity_counter += a->oevent_list.count;
     a->needs_remarking = true;
     a->is_draw_dirty = true;
     break;
+  }
   case Ged_input_cmd_toggle_play_pause:
     ged_set_playing(a, !a->is_playing);
     break;
@@ -2202,6 +2249,7 @@ enum {
   Set_soft_margins_form_id,
   Set_fancy_grid_dots_menu_id,
   Set_fancy_grid_rulers_menu_id,
+  Dialect_menu_id,
 #ifdef FEAT_PORTMIDI
   Portmidi_output_device_menu_id,
 #endif
@@ -2229,6 +2277,7 @@ enum {
   Main_menu_cosmetics,
   Main_menu_playback,
   Main_menu_osc,
+  Main_menu_dialect,
 #ifdef FEAT_PORTMIDI
   Main_menu_choose_portmidi_output,
 #endif
@@ -2252,6 +2301,7 @@ static void push_main_menu(void) {
 #endif
   qmenu_add_spacer(qm);
   qmenu_add_choice(qm, Main_menu_playback, "Clock & Timing...");
+  qmenu_add_choice(qm, Main_menu_dialect, "Operator Dialect...");
   qmenu_add_choice(qm, Main_menu_cosmetics, "Appearance...");
   qmenu_add_spacer(qm);
   qmenu_add_choice(qm, Main_menu_controls, "Controls...");
@@ -2335,6 +2385,23 @@ static void push_osc_output_address_form(char const *initial) {
 static void push_osc_output_port_form(char const *initial) {
   qform_single_line_input(Osc_output_port_form_id, "Set OSC Output Port",
                           initial);
+}
+// The operator dialect (sim.h, spine AD-20): a radio with the active one
+// marked. Picking it again changes nothing.
+enum {
+  Dialect_menu_borca = 1,
+  Dialect_menu_upstream,
+};
+static void push_dialect_menu(Orca_dialect dialect) {
+  bool upstream = dialect == Orca_dialect_upstream;
+  Qmenu *qm = qmenu_create(Dialect_menu_id);
+  qmenu_set_title(qm, "Operator Dialect");
+  qmenu_add_printf(qm, Dialect_menu_borca, "(%c) bOrca", !upstream ? '*' : ' ');
+  qmenu_add_printf(qm, Dialect_menu_upstream, "(%c) Upstream",
+                   upstream ? '*' : ' ');
+  if (upstream)
+    qmenu_set_current_item(qm, Dialect_menu_upstream);
+  qmenu_push_to_nav(qm);
 }
 enum {
   Playback_menu_midi_bclock = 1,
@@ -2451,71 +2518,89 @@ static void push_controls_msg(void) {
     }
   }
 }
-static void push_opers_guide_msg(void) {
+// The operator guide (Ctrl+G, and Operators... in the main menu) lists the
+// active dialect's operators (sim.c's lists), each description at most 42
+// characters.
+static void push_opers_guide_msg(Orca_dialect dialect) {
+  enum { Guide_borca = 1, Guide_upstream = 2, Guide_both = 3 };
   struct Guide_item {
     char glyph;
+    U8 dialects;
     char const *name;
     char const *desc;
   };
-  static struct Guide_item items[] = {
-      {'A', "add", "Outputs sum of inputs."},
-      {'B', "subtract", "Outputs difference of inputs."},
-      {'C', "clock", "Outputs modulo of frame."},
-      {'D', "delay", "Bangs on modulo of frame."},
-      {'E', "east", "Moves eastward, or bangs."},
-      {'F', "if", "Bangs if inputs are equal."},
-      {'G', "generator", "Writes operands with offset."},
-      {'H', "halt", "Halts southward operand."},
-      {'I', "increment", "Increments southward operand."},
-      {'J', "jumper", "Outputs northward operand."},
-      {'K', "konkat", "Reads multiple variables."},
-      {'L', "lesser", "Outputs smallest input."},
-      {'M', "multiply", "Outputs product of inputs."},
-      {'N', "north", "Moves Northward, or bangs."},
-      {'O', "read", "Reads operand with offset."},
-      {'P', "push", "Writes eastward operand."},
-      {'Q', "query", "Reads operands with offset."},
-      {'R', "random", "Outputs random value."},
-      {'r', "random unique", "Shuffles min to max; never twice in a row."},
-      {'S', "south", "Moves southward, or bangs."},
-      {'T', "track", "Reads eastward operand."},
-      {'U', "uclid", "Bangs on Euclidean rhythm."},
-      {'V', "variable", "Reads and writes variable."},
-      {'W', "west", "Moves westward, or bangs."},
-      {'X', "write", "Writes operand with offset."},
-      {'Y', "jymper", "Outputs westward operand."},
-      {'Z', "lerp", "Transitions operand to target."},
-      {'*', "bang", "Bangs neighboring operands."},
-      {'#', "comment", "Halts line."},
-      // {'*', "self", "Sends ORCA command."},
-      {':', "midi", "Sends MIDI note."},
-      {'!', "cc", "Sends MIDI CC; rates 1-y glide from last."},
-      {'?', "pb", "Sends MIDI pitch bend."},
-      {'$', "scale", "Outputs note base on root, scale, degree."},
-      {'%', "mono", "Sends MIDI monophonic note."},
-      {'=', "midichord", "Sends preset chords over MIDI."},
-      {';', "arpeggiator", "Outputs degree numbers for Scale operator."},
-      {'&', "bouncer", "A rudimentary LFO-like operator."}
-      };
+  static struct Guide_item const items[] = {
+      {'A', Guide_both, "add", "Outputs sum of inputs."},
+      {'B', Guide_both, "subtract", "Outputs difference of inputs."},
+      {'C', Guide_both, "clock", "Outputs modulo of frame."},
+      {'D', Guide_both, "delay", "Bangs on modulo of frame."},
+      {'E', Guide_both, "east", "Moves eastward, or bangs."},
+      {'F', Guide_both, "if", "Bangs if inputs are equal."},
+      {'G', Guide_both, "generator", "Writes operands with offset."},
+      {'H', Guide_both, "halt", "Halts southward operand."},
+      {'I', Guide_both, "increment", "Increments southward operand."},
+      {'J', Guide_both, "jumper", "Outputs northward operand."},
+      {'K', Guide_both, "konkat", "Reads multiple variables."},
+      {'L', Guide_both, "lesser", "Outputs smallest input."},
+      {'M', Guide_both, "multiply", "Outputs product of inputs."},
+      {'N', Guide_both, "north", "Moves Northward, or bangs."},
+      {'O', Guide_both, "read", "Reads operand with offset."},
+      {'P', Guide_both, "push", "Writes eastward operand."},
+      {'Q', Guide_both, "query", "Reads operands with offset."},
+      {'R', Guide_both, "random", "Outputs random value."},
+      {'r', Guide_borca, "random unique",
+       "Shuffles min to max; never twice in a row."},
+      {'S', Guide_both, "south", "Moves southward, or bangs."},
+      {'T', Guide_both, "track", "Reads eastward operand."},
+      {'U', Guide_both, "uclid", "Bangs on Euclidean rhythm."},
+      {'V', Guide_both, "variable", "Reads and writes variable."},
+      {'W', Guide_both, "west", "Moves westward, or bangs."},
+      {'X', Guide_both, "write", "Writes operand with offset."},
+      {'Y', Guide_both, "jymper", "Outputs westward operand."},
+      {'Z', Guide_both, "lerp", "Transitions operand to target."},
+      {'*', Guide_both, "bang", "Bangs neighboring operands."},
+      {'#', Guide_both, "comment", "Halts line."},
+      {':', Guide_both, "midi", "Sends MIDI note."},
+      {'!', Guide_borca, "cc", "Sends MIDI CC; rates 1-y glide from last."},
+      {'!', Guide_upstream, "cc", "Sends MIDI control change."},
+      {'?', Guide_both, "pb", "Sends MIDI pitch bend."},
+      {'$', Guide_borca, "scale", "Outputs note base on root, scale, degree."},
+      {'%', Guide_both, "mono", "Sends MIDI monophonic note."},
+      {'=', Guide_borca, "midichord", "Sends preset chords over MIDI."},
+      {'=', Guide_upstream, "osc", "Sends OSC message."},
+      {';', Guide_borca, "arpeggiator",
+       "Outputs degree numbers for Scale operator."},
+      {';', Guide_upstream, "udp", "Sends UDP message."},
+      {'&', Guide_borca, "bouncer", "A rudimentary LFO-like operator."},
+  };
+  U8 const shown =
+      dialect == Orca_dialect_upstream ? Guide_upstream : Guide_borca;
+  int rows = 0;
   int w_desc = 0;
   for (Usz i = 0; i < ORCA_ARRAY_COUNTOF(items); ++i) {
-    if (items[i].desc) {
-      int wr = (int)strlen(items[i].desc);
-      if (wr > w_desc)
-        w_desc = wr;
-    }
+    if (!(items[i].dialects & shown))
+      continue;
+    ++rows;
+    int wr = (int)strlen(items[i].desc);
+    if (wr > w_desc)
+      w_desc = wr;
   }
   int left_pad = 1, mid_pad = 1, right_pad = 1;
   int total_width = left_pad + 1 + mid_pad + w_desc + right_pad;
-  Qmsg *qm = qmsg_push(ORCA_ARRAY_COUNTOF(items), total_width);
-  qmsg_set_title(qm, "Operators");
+  Qmsg *qm = qmsg_push(rows, total_width);
+  qmsg_set_title(qm, dialect == Orca_dialect_upstream ? "Upstream Operators"
+                                                      : "bOrca Operators");
   WINDOW *w = qmsg_window(qm);
-  for (int i = 0; i < (int)ORCA_ARRAY_COUNTOF(items); ++i) {
-    wmove(w, i, left_pad);
+  int row = 0;
+  for (Usz i = 0; i < ORCA_ARRAY_COUNTOF(items); ++i) {
+    if (!(items[i].dialects & shown))
+      continue;
+    wmove(w, row, left_pad);
     waddch(w, (chtype)items[i].glyph | A_bold);
-    wmove(w, i, left_pad + 1 + mid_pad);
+    wmove(w, row, left_pad + 1 + mid_pad);
     wattrset(w, A_normal);
     waddstr(w, items[i].desc);
+    ++row;
   }
 }
 static void push_open_form(char const *initial) {
@@ -2677,7 +2762,8 @@ static char const *const conf_file_name = "orca.conf";
   _(midi_beat_clock)                                                           \
   _(margins)                                                                   \
   _(grid_dot_type)                                                             \
-  _(grid_ruler_type)
+  _(grid_ruler_type)                                                           \
+  _(dialect)
 char const *const confopts[] = {CONFOPTS(CONFOPT_STRING)};
 enum { Confoptslen = ORCA_ARRAY_COUNTOF(confopts) };
 enum { CONFOPTS(CONFOPT_ENUM) };
@@ -2724,8 +2810,21 @@ staticni bool conf_read_boolish(char const *val, bool *out) {
   return false;
 }
 
+// Settings given on the command line (spine AD-20). main() parses each flag
+// into a pending override before curses starts: it sets the key's TOUCHFLAG
+// in keys and its value below. tui_apply_overrides applies them after
+// tui_load_conf, so a flag beats orca.conf, and clears those keys' touched
+// bits: an override lasts for the session only, and tui_save_prefs copies
+// the key's stored line verbatim until a menu change touches the key again.
+// A new override adds its value here and one branch to tui_apply_overrides.
+typedef struct {
+  U32 keys;             // TOUCHFLAG(Confopt_...) of each overridden key
+  Orca_dialect dialect; // --dialect
+} Tui_overrides;
+
 typedef struct {
   Ged ged;
+  Tui_overrides overrides;
   oso *file_name;
   oso *osc_address, *osc_port, *osc_midi_bidule_path;
   int undo_history_limit;
@@ -2818,6 +2917,15 @@ staticni void tui_load_conf(Tui *t) {
       }
       break;
     }
+    case Confopt_dialect: {
+      // borca or upstream; anything else is ignored, which leaves bOrca.
+      Orca_dialect dialect;
+      if (orca_dialect_from_name(ez.value, &dialect)) {
+        ged_set_dialect(&t->ged, dialect);
+        touched |= TOUCHFLAG(Confopt_dialect);
+      }
+      break;
+    }
     }
   }
 
@@ -2858,6 +2966,15 @@ staticni void tui_load_conf(Tui *t) {
   osofree(portmidi_output_device);
   osofree(osc_output_address);
   osofree(osc_output_port);
+}
+
+// Applies the command-line overrides, after tui_load_conf (see
+// Tui_overrides).
+staticni void tui_apply_overrides(Tui *t) {
+  Tui_overrides const *o = &t->overrides;
+  if (o->keys & TOUCHFLAG(Confopt_dialect))
+    ged_set_dialect(&t->ged, o->dialect);
+  t->prefs_touched &= ~o->keys;
 }
 
 staticni void tui_save_prefs(Tui *t) {
@@ -2932,6 +3049,9 @@ staticni void tui_save_prefs(Tui *t) {
     case Confopt_grid_ruler_type:
       fputs(t->fancy_grid_rulers ? prefval_fancy : prefval_plain, ez.file);
       break;
+    case Confopt_dialect:
+      fputs(orca_dialect_name(t->ged.dialect), ez.file);
+      break;
     }
   }
   osofree(midi_output_device_name);
@@ -2995,6 +3115,17 @@ staticni void plainorfancy_menu_was_picked(Tui *t, int picked_id,
   t->prefs_touched |= pref_touch_flag;
   tui_save_prefs(t);
   t->ged.is_draw_dirty = true;
+}
+
+staticni void dialect_menu_was_picked(Tui *t, int picked_id) {
+  Orca_dialect dialect = picked_id == Dialect_menu_upstream
+                             ? Orca_dialect_upstream
+                             : Orca_dialect_borca;
+  qnav_stack_pop();
+  if (!ged_set_dialect(&t->ged, dialect))
+    return; // already the dialect: nothing changes, nothing is saved
+  t->prefs_touched |= TOUCHFLAG(Confopt_dialect);
+  tui_save_prefs(t);
 }
 
 staticni bool tui_restart_osc_udp_if_enabled_diderror(Tui *t) {
@@ -3131,11 +3262,14 @@ staticni Tui_menus_result tui_drive_menus(Tui *t, int key) {
         case Main_menu_osc:
           push_osc_menu(ged_is_using_osc_udp(&t->ged));
           break;
+        case Main_menu_dialect:
+          push_dialect_menu(t->ged.dialect);
+          break;
         case Main_menu_controls:
           push_controls_msg();
           break;
         case Main_menu_opers_guide:
-          push_opers_guide_msg();
+          push_opers_guide_msg(t->ged.dialect);
           break;
         case Main_menu_about:
           push_about_msg();
@@ -3270,6 +3404,9 @@ staticni Tui_menus_result tui_drive_menus(Tui *t, int key) {
       case Set_fancy_grid_rulers_menu_id:
         plainorfancy_menu_was_picked(t, act.picked.id, &t->fancy_grid_rulers,
                                      TOUCHFLAG(Confopt_grid_ruler_type));
+        break;
+      case Dialect_menu_id:
+        dialect_menu_was_picked(t, act.picked.id);
         break;
       case Osc_menu_id:
         switch (act.picked.id) {
@@ -3486,6 +3623,7 @@ enum {
   Argopt_seed,
   Argopt_portmidi_deprecated,
   Argopt_osc_deprecated,
+  Argopt_dialect,
 };
 
 int main(int argc, char **argv) {
@@ -3498,6 +3636,7 @@ int main(int argc, char **argv) {
       {"strict-timing", no_argument, 0, Argopt_strict_timing},
       {"bpm", required_argument, 0, Argopt_bpm},
       {"seed", required_argument, 0, Argopt_seed},
+      {"dialect", required_argument, 0, Argopt_dialect},
       {"portmidi-list-devices", no_argument, 0, Argopt_portmidi_deprecated},
       {"portmidi-output-device", required_argument, 0,
        Argopt_portmidi_deprecated},
@@ -3554,6 +3693,13 @@ int main(int argc, char **argv) {
       if (read_int(optarg, &init_seed) && init_seed >= 0)
         break;
       OPTFAIL("Must be 0 or positive integer.");
+    case Argopt_dialect:
+      if (orca_dialect_from_name(optarg, &t.overrides.dialect)) {
+        t.overrides.keys |= TOUCHFLAG(Confopt_dialect);
+        break;
+      }
+      usage(); // then the error, last, where it shows
+      OPTFAIL("Must be borca or upstream.");
     case Argopt_init_grid_size:
       if (sscanf(optarg, "%dx%d", &init_grid_dim_x, &init_grid_dim_y) != 2)
         OPTFAIL("Bad format or count. Expected something like: 40x30");
@@ -3712,6 +3858,7 @@ int main(int argc, char **argv) {
   printf("\033[?2004h\n"); // Ask terminal to use bracketed paste.
 
   tui_load_conf(&t);                  // load orca.conf (if it exists)
+  tui_apply_overrides(&t);            // then the flags, which beat it
   tui_restart_osc_udp_if_enabled(&t); // start udp if conf enabled it
 
   wtimeout(stdscr, 0);
@@ -4165,7 +4312,7 @@ event_loop:;
     push_controls_msg();
     break;
   case CTRL_PLUS('g'):
-    push_opers_guide_msg();
+    push_opers_guide_msg(t.ged.dialect);
     break;
   case CTRL_PLUS('s'):
     tui_try_save(&t);

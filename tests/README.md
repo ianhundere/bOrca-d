@@ -149,22 +149,40 @@ The five patches in `examples/upstream/` (`basics/_osc`, `basics/_udp`,
 `benchmarks/io`, `misc/udp+loop` and `setups/knobs`) are upstream Orca-c
 examples, byte-identical to Orca-c `9df9786`'s and at its relative paths
 (`examples/upstream/README.md`). They use upstream's OSC, UDP and CC
-operators, which bOrca's dialect replaces, so they wait for
-`--dialect upstream`, which I1 adds. Each has three files under
+operators, which bOrca's dialect replaces, so they run in the upstream
+dialect (`--dialect upstream`). Each has two files under
 `tests/expected/examples/upstream/<dir>/`:
 
 - `<name>.events`: Orca-c `9df9786`'s own `cli --events -t 96 --seed 0`
-  output. It is 96 ticks long because CAP-13 compares 96 ticks against
-  Orca-c, so these are the goldens I1 flips;
-- `<name>.args`: `-t 96 --dialect upstream`;
-- `<name>.xfail`: `I1`.
+  output, 96 ticks long because CAP-13 compares 96 ticks against Orca-c;
+- `<name>.args`: `-t 96 --dialect upstream`.
 
-Until I1, `cli` rejects `--dialect upstream` and exits 1, so each case
-reports `XFAIL … (waiting for I1)`; I1 deletes the markers when its output
-matches, and an XPASS before then fails the run.
+They pass: bOrca's upstream dialect prints exactly what Orca-c does. Each
+golden holds event lines, which is the proof that every patch under
+`examples/upstream/` does something in the upstream dialect (CAP-13;
+`tests/check-examples.sh` covers the rest of `examples/` in bOrca's).
+Until I1 added the dialect, `cli` rejected `--dialect upstream` and each case
+carried an `I1` marker; I1 deleted the markers.
 
-The goldens come from an Orca-c build that `tests/upstream/` holds, and that
-I1 reuses in CI for its byte-identity check:
+`benchmarks/io` drives `:`, `!`, `;`, `=`, `?` and `$` from clocked tracks.
+Its bOrca-dialect coverage stays in `tests/patches/io_borca.orca`, a copy of
+the patch, whose `tests/expected/patches/io_borca.events` is the golden
+`benchmarks/io` had before the move, unchanged.
+
+The unit tests `dialect_*` in `tests/unit/test_dialect.c` check the rest of
+the dialect on small grids: a context that names no dialect runs bOrca's
+list; upstream `!` sends a plain CC from three inputs at value × 127 / 35;
+upstream `r` is a banged `R`, cell for cell and tick for tick; upstream `;`
+locks and sends at most 16 glyphs up to a `.`; upstream `=` sends its path
+and values; both stop at the grid's east edge; upstream `$` and `&` write,
+mark and keep nothing; the tick body runs `Tick_ctx`'s dialect, so upstream
+`;` and `=` reach the sink's `osc` and upstream `!` goes out as a plain CC;
+and only `borca` and `upstream` are dialect names.
+
+### The upstream comparison
+
+`tests/upstream/` holds an Orca-c build, which made the goldens above, and
+the check that compares bOrca's upstream dialect with it (spine AD-21):
 
 - `orca-c-cli.patch` adds `--events` and `--seed` to Orca-c's `cli_main.c`,
   with the output and parsing of bOrca's `cli`, and `events_print.c` to the
@@ -179,26 +197,39 @@ I1 reuses in CI for its byte-identity check:
   `events_print.h` into it, so both `cli`s print through one file, applies
   the patch with `patch -p1`, and builds `build/upstream/cli` with Orca-c's
   own `tool`. It needs git, tar, patch and a C compiler.
+- `compare.sh <bOrca cli>` needs that build, and checks, reporting each
+  failure and carrying on:
+  1. the tree's `events_print.c` and `events_print.h` are this repository's;
+  2. every `examples/**/*.orca` of the Orca-c tree, 43 files: Orca-c's
+     `cli --events -t 96 --seed 0` and bOrca's, with `--dialect upstream`
+     added, print byte-identical events and grids, and both exit 0 with no
+     sanitizer report. Fewer than 43 files fails;
+  3. each `examples/upstream/<rel>.orca` is Orca-c's `examples/<rel>.orca`,
+     and its golden is what Orca-c's `cli` prints for it, so neither can
+     drift from Orca-c, and holds at least one event line;
+  4. its list of the six exceptions is exactly the paths of the list in
+     `tests/check-examples.sh`, so the two change together, and each is
+     Orca-c's file at the same path.
 
-To rebuild the Orca-c `cli` and check every golden against it (write with
-`>` instead of `cmp` to remake one); the last line fails, with status 1,
-if any golden differs:
+  It exits 0 only when every check passes, 1 otherwise, and 2 on usage or
+  when the Orca-c build is missing. CI runs it in both `build` legs, on the
+  debug and the release `cli`, and proves it can fail with two canaries: the
+  release `cli` with `--dialect borca` appended, and an upstream golden with
+  a byte appended. To remake a golden, write the Orca-c `cli`'s
+  output over it (`build/upstream/cli --events -t 96 --seed 0
+  examples/upstream/<rel>.orca >tests/expected/examples/upstream/<rel>.events`).
 
-```sh
-nice -n 19 taskset -c 0-2 tests/upstream/build-cli.sh
-status=0
-for rel in basics/_osc basics/_udp benchmarks/io misc/udp+loop setups/knobs; do
-  nice -n 19 taskset -c 0-2 build/upstream/cli --events -t 96 --seed 0 \
-    "examples/upstream/$rel.orca" |
-    cmp - "tests/expected/examples/upstream/$rel.events" || status=1
-done
-test "$status" = 0
+```text
+$ nice -n 19 taskset -c 0-2 tests/upstream/build-cli.sh
+…
+Built …/build/upstream/cli
+$ nice -n 19 taskset -c 0-2 tests/upstream/compare.sh build/cli
+PASS  events_print.c is the Orca-c build's copy
+…
+PASS  examples/basics/_midi.orca
+…
+upstream check: 43 examples, 43 identical; 5 goldens, 5 match; 13 files, 13 match; 0 fail
 ```
-
-`benchmarks/io` drives `:`, `!`, `;`, `=`, `?` and `$` from clocked tracks.
-Its bOrca-dialect coverage stays in `tests/patches/io_borca.orca`, a copy of
-the patch, whose `tests/expected/patches/io_borca.events` is the golden
-`benchmarks/io` had before the move, unchanged.
 
 ## README tables and examples
 
@@ -245,7 +276,7 @@ to do something in bOrca's dialect (`amendments.md` B7):
 
 Six named exceptions fail that rule on purpose. The script lists each with
 its reason, reports it as EXCEPT, and they stay byte-identical to upstream
-Orca-c's examples:
+Orca-c's examples, which `tests/upstream/compare.sh` checks:
 
 | Exception | Why it fails the rule |
 | --- | --- |

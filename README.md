@@ -4,7 +4,7 @@ Orca is an [esoteric programming language](https://en.wikipedia.org/wiki/Esoteri
 
 This is the C implementation of the [ORCΛ](https://wiki.xxiivv.com/site/orca.html) language and terminal livecoding environment. It's designed to be power efficient. It can handle large files, even if your terminal is small.
 
-Orca is not a synthesizer, but a flexible livecoding environment capable of sending MIDI to your audio/visual interfaces like Ableton, Renoise, VCV Rack, or SuperCollider. This fork has no OSC or UDP operators (its `=` and `;` are the Midichord and Arpeggiator operators below). Its only OSC output is the `/orca/bpm`, `/orca/started` and `/orca/stopped` messages, sent to the address set under OSC Output in the main menu, and MIDI sent as OSC with `--osc-midi-bidule`.
+Orca is not a synthesizer, but a flexible livecoding environment capable of sending MIDI, OSC and UDP to your audio/visual interfaces like Ableton, Renoise, VCV Rack, or SuperCollider. In this fork's own operator [dialect](#dialects), the default, `=` and `;` are the Midichord and Arpeggiator operators below; the upstream dialect keeps upstream Orca-c's OSC (`=`) and UDP (`;`) operators. They send to the address set under OSC Output in the main menu, as do the `/orca/bpm`, `/orca/started` and `/orca/stopped` messages and MIDI sent as OSC with `--osc-midi-bidule`.
 
 <img src='https://raw.githubusercontent.com/wiki/hundredrabbits/Orca-c/PREVIEW.jpg' width='600'/>
 
@@ -18,7 +18,20 @@ I'll try to add new operators based on my needs. I'm not a professional programm
 - Using it through SSH on a Raspberry Pi Zero 2W, connected to an iPad Pro 11", outputting MIDI data via USB, acting as a MIDI Gadget
 - Using it on my uConsole terminal, paired to a CME WIDI Jack via Bluetooth, which is connected to the MIDI ports of a Torso S4.
 
-The patches in `examples/upstream/` are upstream Orca-c examples for `--dialect upstream`, which a later release adds (spec item I1); see [`examples/upstream/README.md`](examples/upstream/README.md).
+The patches in `examples/upstream/` are upstream Orca-c examples, which play in the upstream [dialect](#dialects); see [`examples/upstream/README.md`](examples/upstream/README.md).
+
+## Dialects
+
+bOrca runs one of two operator lists, its dialect:
+
+- **bOrca** (the default) is this fork's: `!` is the MIDI CC operator with three control digits and glides, `$` the Scale operator, `;` the Arpeggiator, `=` the Midichord operator, `&` the Bouncer, and lowercase `r` deals from a shuffled bag. The sections below describe them.
+- **Upstream** is upstream Orca-c's (at `9df9786`), so its patches play unchanged. `!` sends a MIDI CC from three inputs, channel, control and value: the control is one glyph, `0`-`z` for controls 0-35, the value's `0`-`z` is scaled to 0-127 (× 127 / 35), and it never glides; it sends nothing when the channel is above `f` or the channel or control is empty. `;` sends the glyphs east of it, up to the first `.` and at most 16, as one UDP datagram. `=` sends an OSC message to `/` plus its first input, with as many integers as its second input says, read from the inputs east of that. Lowercase `r` is a banged `R`, so its max is exclusive. `$` and `&` do nothing.
+
+Every other operator, `A`-`Z` but `R`, `*`, `#`, `:`, `%` and `?`, is the same in both, and uppercase `R` runs the same hash in both. The editor colours ports bOrca's way in both dialects: `:`, `%`, `?`, `G` and `K` mark some inputs as parameters where upstream Orca-c marks them as plain inputs, which changes only how they look, never the events or the grid. OSC and UDP go to the address and port set under OSC Output in the main menu, and nowhere while OSC output is off.
+
+To switch, open the main menu (Ctrl+D), choose Operator Dialect..., and pick bOrca or Upstream. The choice is saved in `orca.conf` as `dialect = borca` or `dialect = upstream`; a value other than these two is ignored, which leaves bOrca. `orca --dialect upstream` (or `borca`) picks the dialect for one session, over the saved one, without changing what is saved. Picking the dialect that is already active saves nothing, even when `--dialect` chose it; to save the dialect `--dialect` chose, pick the other one and then pick it back. `cli --dialect upstream` runs a patch headless in the upstream dialect. Changing the dialect, even while playing, clears every operator's per-cell state, as Ctrl+R does, and stops running CC glides. The operator guide (Ctrl+G) lists the active dialect's operators. In the upstream dialect, the tooltips of `!`, `;`, `=`, `$` and `&` still name bOrca's inputs.
+
+CI checks the upstream dialect byte for byte against upstream Orca-c's own `cli` on all 43 of its examples (see [`tests/README.md`](tests/README.md)).
 
 ## Tooltip System
 This fork includes an enhanced tooltip system inspired by the original tooltip functionality found in the Elektron version of ORCA. When positioning the cursor over operator input ports, contextual tooltips appear in the bottom-right corner of the screen showing parameter names like "Channel", "Octave", "Velocity", etc. This makes learning and using operators much more intuitive, especially for complex operators with multiple inputs. The tooltip system works across all operators and provides immediate feedback about what each port represents without needing to reference documentation.
@@ -104,7 +117,7 @@ This unified system allows the Scale operator to access both traditional scales 
 
 
 ## Midichord Operator (`=`)
-The Midichord operator outputs MIDI notes to form chord types using the unified system. It supports enriched chords (0-9), chord root positions (a-z) and first inversions (A-Z), making it useful for harmonic progressions and complex chord sequences. (This replaces OSC operator, as I never use it)
+The Midichord operator outputs MIDI notes to form chord types using the unified system. It supports enriched chords (0-9), chord root positions (a-z) and first inversions (A-Z), making it useful for harmonic progressions and complex chord sequences. (This replaces OSC operator, as I never use it; the upstream [dialect](#dialects) keeps it.)
 
 | Operator | Channel | Octave | Root Note | Chord Type | Velocity | Duration |
 |:--------:|:-------:|:------:|:---------:|:----------:|:--------:|:--------:|
@@ -479,7 +492,7 @@ No example patch: any patch with a note operator shows it. (B4)
 
 ### `orca_run` takes a context with a caller-owned operator-state store, and `&`, `;` and `r` keep their state per cell
 
-API break: `orca_run` keeps its seven arguments and takes an eighth, `Orca_run_ctx const *ctx` (`sim.h`). Its one field, `opstate`, is required and points at an `Opstate_store` (`opstate.h`) that the caller sets up with `opstate_init`, keeps across ticks and releases with `opstate_free`. Every existing caller must change. The store holds the per-cell state of `&`, `;` and lowercase `r`, which used to live in fixed-size arrays and one global shuffle inside `sim.c`; the arrays overflowed or gave up on large grids, and the state never reset on open.
+API break: `orca_run` keeps its seven arguments and takes an eighth, `Orca_run_ctx const *ctx` (`sim.h`). Its field `opstate` is required and points at an `Opstate_store` (`opstate.h`) that the caller sets up with `opstate_init`, keeps across ticks and releases with `opstate_free`. Every existing caller must change. Every other field defaults to its zero value: `dialect`, added later, is then bOrca's operator list (see [Dialects](#dialects)), so the caller below runs bOrca's operators. The store holds the per-cell state of `&`, `;` and lowercase `r`, which used to live in fixed-size arrays and one global shuffle inside `sim.c`; the arrays overflowed or gave up on large grids, and the state never reset on open.
 
 For embedders: `reset_last_unique_value()` is removed; `opstate_clear()` replaces it. A build that lists the core sources itself must add `opstate.c`. Clear the store when a patch is loaded, call `opstate_prune` on a resize, and run any preview pass on an `opstate_copy` of the store, never on the store itself.
 

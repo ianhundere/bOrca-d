@@ -22,8 +22,10 @@ fprintf(stderr,
 "                  t<tick>), then 't<tick> GRID' and the grid. With -q,\n"
 "                  print the event lines only.\n"
 "    --seed <n>    Seed for the random operators. Default: 0\n"
-"    --dialect <d> Operator dialect: borca (default) or upstream.\n"
-"                  upstream is not implemented yet and is rejected.\n"
+"    --dialect <d> Operator dialect: borca (default) or upstream,\n"
+"                  upstream Orca-c's operators: ! sends a plain CC,\n"
+"                  ; UDP, = OSC, r is a banged R, and $ and & do\n"
+"                  nothing.\n"
 "    -h or --help  Print this message and exit.\n"
 );} // clang-format on
 
@@ -58,6 +60,7 @@ int main(int argc, char **argv) {
   bool print_output = true;
   bool print_events = false;
   Usz seed = 0;
+  Orca_dialect dialect = Orca_dialect_borca;
 
   for (;;) {
     int c = getopt_long(argc, argv, "t:qh", cli_options, NULL);
@@ -89,17 +92,11 @@ int main(int argc, char **argv) {
       }
       break;
     case Argopt_dialect:
-      if (strcmp(optarg, "upstream") == 0) {
-        fprintf(stderr, "Dialect upstream is not implemented yet. "
-                        "Only borca is available.\n");
-        return 1;
-      }
-      if (strcmp(optarg, "borca") != 0) {
+      if (!orca_dialect_from_name(optarg, &dialect)) {
         fprintf(stderr, "Unknown dialect %s. Expected borca or upstream.\n",
                 optarg);
         return 1;
       }
-      // I1 (CAP-13) passes the accepted dialect to orca_run from here.
       break;
     case 'h':
       usage();
@@ -140,7 +137,7 @@ int main(int argc, char **argv) {
   // The per-cell state of &, ; and r, owned here for the whole run.
   Opstate_store opstate;
   opstate_init(&opstate);
-  Orca_run_ctx const ctx = {.opstate = &opstate};
+  Orca_run_ctx const ctx = {.opstate = &opstate, .dialect = dialect};
   for (Usz i = 0; i < max_ticks; ++i) {
     mbuffer_clear(mbuf_r.buffer, field.height, field.width);
     oevent_list_clear(&oevent_list);

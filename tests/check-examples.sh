@@ -18,7 +18,8 @@
 # file that does not exist, fails the run, so the list cannot go stale. A
 # non-zero cli exit, a sanitizer report, a signal or a timeout fails the
 # file, exception or not. examples/upstream/ is skipped: those patches need
-# --dialect upstream (I1), and their goldens are XFAIL in tests/run.sh.
+# --dialect upstream, and their tests/run.sh goldens, which pass and hold
+# event lines, prove that each does something there (CAP-13).
 #
 # Exit status: 0 when every file passes or is a listed exception that still
 # fails the rule, 1 otherwise, 2 on usage.
@@ -26,7 +27,8 @@ set -u
 
 # The named exceptions (Ian's decision, 2026-10-10): one per line, the path
 # relative to the repository root, then its reason. They stay byte-identical
-# to upstream Orca-c's examples.
+# to upstream Orca-c's examples, which tests/upstream/compare.sh checks with
+# its own copy of this list.
 exceptions='examples/basics/a.orca its A outputs already hold their sums, so no tick changes the grid
 examples/basics/k.orca its K outputs already hold the variables, so no tick changes the grid
 examples/basics/l.orca its L outputs already hold the lesser inputs, so no tick changes the grid

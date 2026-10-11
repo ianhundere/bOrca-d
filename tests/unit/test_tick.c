@@ -195,8 +195,9 @@ static void run_cap9(bool edit, bool preview, Recording *out,
   if (preview) {
     memcpy(scratch, grid, sizeof scratch);
     CHECK(opstate_copy(&store, &scratch_store));
+    Orca_run_ctx const preview_ctx = {.opstate = &scratch_store};
     tick_run_vm(scratch, marks, H, W, tick_num, &engine_list, 0,
-                &scratch_store);
+                &preview_ctx);
     *preview_count = engine_list.count;
   }
 
@@ -876,7 +877,8 @@ void test_tick_run_vm_clears_list(void) {
                                     .control = 1,
                                     .value = 2};
 
-  tick_run_vm(grid, marks, H, W, 0, &tick_list, 0, &store);
+  Orca_run_ctx const run_ctx = {.opstate = &store};
+  tick_run_vm(grid, marks, H, W, 0, &tick_list, 0, &run_ctx);
   CHECK(tick_list.count == 3); // the note, the CC and the pitch bend
   bool saw_stale = false;
   for (Usz i = 0; i < tick_list.count; ++i) {

@@ -29,6 +29,13 @@
   X(sim_r_first_visit_and_clear)                                               \
   X(sim_preview_isolation)                                                     \
   X(sim_clear_and_prune)                                                       \
+  X(dialect_names)                                                             \
+  X(dialect_default_is_borca)                                                  \
+  X(dialect_upstream_cc)                                                       \
+  X(dialect_upstream_r)                                                        \
+  X(dialect_upstream_udp_osc)                                                  \
+  X(dialect_upstream_inert)                                                    \
+  X(dialect_tick_body_upstream)                                                \
   X(ccout_glide_continuity)                                                    \
   X(ccout_glide_from_instant)                                                  \
   X(ccout_unknown_last_value)                                                  \

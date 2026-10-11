@@ -181,19 +181,32 @@ static void oper_poke_and_stun(Glyph *restrict gbuffer, Mark *restrict mbuffer,
   } while(0)
 //////// Operators
 
-#define UNIQUE_OPERATORS(_)                                                    \
-  _('!', midicc)                                                               \
+// The operator lists, one per dialect (architecture spine AD-18; sim.h's
+// Orca_dialect). Each dialect runs the shared lists plus its own. orca_run
+// picks one dialect's lists once per call, outside the cell loop, so no
+// operator body reads the dialect. An ALPHA list names the uppercase glyph,
+// and ALPHA_CASE sends its lowercase to the same body.
+#define SHARED_UNIQUE_OPERATORS(_)                                             \
   _('#', comment)                                                              \
-  _('$', scale)                                                                \
   _('%', midi)                                                                 \
   _('*', bang)                                                                 \
   _(':', midi)                                                                 \
+  _('?', midipb)
+
+#define BORCA_UNIQUE_OPERATORS(_)                                              \
+  _('!', midicc)                                                               \
+  _('$', scale)                                                                \
   _(';', arpeggiator)                                                          \
   _('=', midichord)                                                            \
-  _('?', midipb)                                                               \
   _('&', bouncer)
 
-#define ALPHA_OPERATORS(_)                                                     \
+// Orca-c 9df9786's own. It has no $ or &, so those glyphs do nothing here.
+#define UPSTREAM_UNIQUE_OPERATORS(_)                                           \
+  _('!', midicc_upstream)                                                      \
+  _(';', udp)                                                                  \
+  _('=', osc)
+
+#define SHARED_ALPHA_OPERATORS(_)                                              \
   _('A', add)                                                                  \
   _('B', subtract)                                                             \
   _('C', clock)                                                                \
@@ -211,7 +224,6 @@ static void oper_poke_and_stun(Glyph *restrict gbuffer, Mark *restrict mbuffer,
   _('O', offset)                                                               \
   _('P', push)                                                                 \
   _('Q', query)                                                                \
-  _('R', random)                                                               \
   _('S', movement)                                                             \
   _('T', track)                                                                \
   _('U', uclid)                                                                \
@@ -220,6 +232,11 @@ static void oper_poke_and_stun(Glyph *restrict gbuffer, Mark *restrict mbuffer,
   _('X', teleport)                                                             \
   _('Y', yump)                                                                 \
   _('Z', lerp)
+
+// Uppercase R is the same hash in both (random_hashed); lowercase r is
+// bOrca's shuffle bag, and upstream's banged R.
+#define BORCA_ALPHA_OPERATORS(_) _('R', random)
+#define UPSTREAM_ALPHA_OPERATORS(_) _('R', random_upstream)
 
 BEGIN_OPERATOR(movement)
   if (glyph_is_lowercase(This_oper_char) &&
@@ -1103,6 +1120,47 @@ static void initialize_sequence(Opstate_random *state, Usz min, Usz max) {
   shuffle_bag(state);
 }
 
+// Uppercase R in both dialects, and upstream's banged r: Orca-c 9df9786's
+// body, unchanged, so both dialects keep its hash (spine AD-8). The output
+// is min up to, but not including, max; a max of 0 counts as 36, and the
+// output takes the max's case unless min equals max.
+static ORCA_FORCEINLINE void
+random_hashed(Glyph *const restrict gbuffer, Mark *const restrict mbuffer,
+              Usz const height, Usz const width, Usz const y, Usz const x,
+              Usz Tick_number, Oper_extra_params *const extra_params) {
+  PORT(0, -1, IN | PARAM, "Min");
+  PORT(0, 1, IN, "Max");
+  PORT(1, 0, OUT, "");
+  Glyph gb = PEEK(0, 1);
+  Usz a = index_of(PEEK(0, -1));
+  Usz b = index_of(gb);
+  if (b == 0)
+    b = 36;
+  Usz min, max;
+  if (a == b) {
+    POKE(1, 0, glyph_of(a));
+    return;
+  } else if (a < b) {
+    min = a;
+    max = b;
+  } else {
+    min = b;
+    max = a;
+  }
+  // Initial input params for the hash
+  Usz key = (extra_params->random_seed + y * width + x) ^
+            (Tick_number << UINT32_C(16));
+  // 32-bit shift_mult hash to evenly distribute bits
+  key = (key ^ UINT32_C(61)) ^ (key >> UINT32_C(16));
+  key = key + (key << UINT32_C(3));
+  key = key ^ (key >> UINT32_C(4));
+  key = key * UINT32_C(0x27d4eb2d);
+  key = key ^ (key >> UINT32_C(15));
+  // Hash finished. Restrict to desired range of numbers.
+  Usz val = key % (max - min) + min;
+  POKE(1, 0, glyph_with_case(glyph_of(val), gb));
+}
+
 // Modified random operator for lowercase 'r' - requires bang, uses shuffle to avoid consecutive duplicates
 BEGIN_OPERATOR(random)
   // Check if this is lowercase 'r' (shuffle/unique random) or uppercase 'R' (pure random)
@@ -1163,38 +1221,16 @@ BEGIN_OPERATOR(random)
     POKE(1, 0, glyph_with_case(glyph_of(result), max_glyph));
   } else {
     // Uppercase 'R' - pure random, evaluated every tick
-    PORT(0, -1, IN | PARAM, "Min");
-    PORT(0, 1, IN, "Max");
-    PORT(1, 0, OUT, "");
-    Glyph gb = PEEK(0, 1);
-    Usz a = index_of(PEEK(0, -1));
-    Usz b = index_of(gb);
-    if (b == 0)
-      b = 36;
-    Usz min, max;
-    if (a == b) {
-      POKE(1, 0, glyph_of(a));
-      return;
-    } else if (a < b) {
-      min = a;
-      max = b;
-    } else {
-      min = b;
-      max = a;
-    }
-    // Initial input params for the hash
-    Usz key = (extra_params->random_seed + y * width + x) ^
-              (Tick_number << UINT32_C(16));
-    // 32-bit shift_mult hash to evenly distribute bits
-    key = (key ^ UINT32_C(61)) ^ (key >> UINT32_C(16));
-    key = key + (key << UINT32_C(3));
-    key = key ^ (key >> UINT32_C(4));
-    key = key * UINT32_C(0x27d4eb2d);
-    key = key ^ (key >> UINT32_C(15));
-    // Hash finished. Restrict to desired range of numbers.
-    Usz val = key % (max - min) + min;
-    POKE(1, 0, glyph_with_case(glyph_of(val), gb));
+    random_hashed(gbuffer, mbuffer, height, width, y, x, Tick_number,
+                  extra_params);
   }
+END_OPERATOR
+
+// Orca-c 9df9786's R and r, the upstream dialect's (CAP-13): r is a banged R.
+BEGIN_OPERATOR(random_upstream)
+  LOWERCASE_REQUIRES_BANG;
+  random_hashed(gbuffer, mbuffer, height, width, y, x, Tick_number,
+                extra_params);
 END_OPERATOR
 
 // BOORCH's BOUNCER OP
@@ -1290,7 +1326,113 @@ BEGIN_OPERATOR(bouncer)
   POKE(1, 0, glyph_of(output_value));
 END_OPERATOR
 
+//////// The upstream dialect's own operators (CAP-13)
+
+// Orca-c 9df9786's !, ; and = bodies, unchanged but for PORT's label (so !
+// names its three input ports one by one), so the upstream dialect's events,
+// grid and locks match Orca-c's (spine AD-18, AD-21). Its R and r are
+// random_upstream, above.
+
+// A plain CC from three inputs: channel, control, and a value 0-z scaled to
+// 0-127 by x 127 / 35. Never a glide.
+BEGIN_OPERATOR(midicc_upstream)
+  PORT(0, 1, IN, "Channel");
+  PORT(0, 2, IN, "Control");
+  PORT(0, 3, IN, "Value");
+  STOP_IF_NOT_BANGED;
+  Glyph channel_g = PEEK(0, 1);
+  Glyph control_g = PEEK(0, 2);
+  Glyph value_g = PEEK(0, 3);
+  if (channel_g == '.' || control_g == '.')
+    return;
+  Usz channel = index_of(channel_g);
+  if (channel > 15)
+    return;
+  PORT(0, 0, OUT, "");
+  Oevent_midi_cc *oe =
+      (Oevent_midi_cc *)oevent_list_alloc_item(extra_params->oevent_list);
+  oe->oevent_type = Oevent_type_midi_cc;
+  oe->channel = (U8)channel;
+  oe->control = (U8)index_of(control_g);
+  oe->value = (U8)(index_of(value_g) * 127 / 35); // 0~35 -> 0~127
+END_OPERATOR
+
+// Sends the glyphs east of it, up to the first '.' and at most 16, as one
+// UDP datagram. It locks them whether banged or not.
+BEGIN_OPERATOR(udp)
+  Usz n = width - x - 1;
+  if (n > 16)
+    n = 16;
+  Glyph const *restrict gline = gbuffer + y * width + x + 1;
+  Mark *restrict mline = mbuffer + y * width + x + 1;
+  Glyph cpy[Oevent_udp_string_count];
+  Usz i;
+  for (i = 0; i < n; ++i) {
+    Glyph g = gline[i];
+    if (g == '.')
+      break;
+    cpy[i] = g;
+    mline[i] |= Mark_flag_lock;
+  }
+  n = i;
+  STOP_IF_NOT_BANGED;
+  PORT(0, 0, OUT, "");
+  Oevent_udp_string *oe =
+      (Oevent_udp_string *)oevent_list_alloc_item(extra_params->oevent_list);
+  oe->oevent_type = (U8)Oevent_type_udp_string;
+  oe->count = (U8)n;
+  for (i = 0; i < n; ++i) {
+    oe->chars[i] = cpy[i];
+  }
+END_OPERATOR
+
+// Sends an OSC message to the path /<path glyph>, with count integers, each
+// a value glyph's 0-35, read east of the count.
+BEGIN_OPERATOR(osc)
+  PORT(0, 1, IN | PARAM, "Path");
+  PORT(0, 2, IN | PARAM, "Count");
+  Usz len = index_of(PEEK(0, 2));
+  if (len > Oevent_osc_int_count)
+    len = Oevent_osc_int_count;
+  for (Usz i = 0; i < len; ++i) {
+    PORT(0, (Isz)i + 3, IN, "Value");
+  }
+  STOP_IF_NOT_BANGED;
+  Glyph g = PEEK(0, 1);
+  if (g != '.') {
+    PORT(0, 0, OUT, "");
+    U8 buff[Oevent_osc_int_count];
+    for (Usz i = 0; i < len; ++i) {
+      buff[i] = (U8)index_of(PEEK(0, (Isz)i + 3));
+    }
+    Oevent_osc_ints *oe =
+        &oevent_list_alloc_item(extra_params->oevent_list)->osc_ints;
+    oe->oevent_type = (U8)Oevent_type_osc_ints;
+    oe->glyph = g;
+    oe->count = (U8)len;
+    for (Usz i = 0; i < len; ++i) {
+      oe->numbers[i] = buff[i];
+    }
+  }
+END_OPERATOR
+
 //////// Run simulation
+
+bool orca_dialect_from_name(char const *name, Orca_dialect *out) {
+  if (strcmp(name, "borca") == 0) {
+    *out = Orca_dialect_borca;
+    return true;
+  }
+  if (strcmp(name, "upstream") == 0) {
+    *out = Orca_dialect_upstream;
+    return true;
+  }
+  return false;
+}
+
+char const *orca_dialect_name(Orca_dialect d) {
+  return d == Orca_dialect_upstream ? "upstream" : "borca";
+}
 
 void orca_run(Glyph *restrict gbuf, Mark *restrict mbuf, Usz height, Usz width,
               Usz tick_number, Oevent_list *oevent_list, Usz random_seed,
@@ -1304,17 +1446,6 @@ void orca_run(Glyph *restrict gbuf, Mark *restrict mbuf, Usz height, Usz width,
   extras.random_seed = random_seed;
   extras.ctx = ctx;
 
-  for (Usz iy = 0; iy < height; ++iy) {
-    Glyph const *glyph_row = gbuf + iy * width;
-    Mark const *mark_row = mbuf + iy * width;
-    for (Usz ix = 0; ix < width; ++ix) {
-      Glyph glyph_char = glyph_row[ix];
-      if (ORCA_LIKELY(glyph_char == '.'))
-        continue;
-      Mark cell_flags = mark_row[ix] & (Mark_flag_lock | Mark_flag_sleep);
-      if (cell_flags & (Mark_flag_lock | Mark_flag_sleep))
-        continue;
-      switch (glyph_char) {
 #define UNIQUE_CASE(_oper_char, _oper_name)                                    \
   case _oper_char:                                                             \
     oper_behavior_##_oper_name(gbuf, mbuf, height, width, iy, ix, tick_number, \
@@ -1327,11 +1458,36 @@ void orca_run(Glyph *restrict gbuf, Mark *restrict mbuf, Usz height, Usz width,
     oper_behavior_##_oper_name(gbuf, mbuf, height, width, iy, ix, tick_number, \
                                &extras, cell_flags, glyph_char);               \
     break;
-        UNIQUE_OPERATORS(UNIQUE_CASE)
-        ALPHA_OPERATORS(ALPHA_CASE)
+
+// The cell loop, over one dialect's lists: the shared ones plus the
+// dialect's own. It is instantiated once per dialect and chosen once per
+// call (spine AD-18), so the per-cell dispatch is the same switch either way.
+#define CELL_LOOP(_dialect_unique_list, _dialect_alpha_list)                   \
+  for (Usz iy = 0; iy < height; ++iy) {                                        \
+    Glyph const *glyph_row = gbuf + iy * width;                                \
+    Mark const *mark_row = mbuf + iy * width;                                  \
+    for (Usz ix = 0; ix < width; ++ix) {                                       \
+      Glyph glyph_char = glyph_row[ix];                                        \
+      if (ORCA_LIKELY(glyph_char == '.'))                                      \
+        continue;                                                              \
+      Mark cell_flags = mark_row[ix] & (Mark_flag_lock | Mark_flag_sleep);     \
+      if (cell_flags & (Mark_flag_lock | Mark_flag_sleep))                     \
+        continue;                                                              \
+      switch (glyph_char) {                                                    \
+        SHARED_UNIQUE_OPERATORS(UNIQUE_CASE)                                   \
+        _dialect_unique_list(UNIQUE_CASE)                                      \
+        SHARED_ALPHA_OPERATORS(ALPHA_CASE)                                     \
+        _dialect_alpha_list(ALPHA_CASE)                                        \
+      }                                                                        \
+    }                                                                          \
+  }
+
+  if (ctx->dialect == Orca_dialect_upstream) {
+    CELL_LOOP(UPSTREAM_UNIQUE_OPERATORS, UPSTREAM_ALPHA_OPERATORS)
+  } else {
+    CELL_LOOP(BORCA_UNIQUE_OPERATORS, BORCA_ALPHA_OPERATORS)
+  }
+#undef CELL_LOOP
 #undef UNIQUE_CASE
 #undef ALPHA_CASE
-      }
-    }
-  }
 }

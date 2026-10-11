@@ -2,6 +2,7 @@
 #include "base.h"
 #include "ccout.h"
 #include "opstate.h"
+#include "sim.h"
 #include "vmio.h"
 
 // The tick path (architecture spine AD-12, AD-14). tick.c is shell code that
@@ -76,6 +77,7 @@ typedef struct {
   Usz height, width;
   Usz random_seed;
   Opstate_store *opstate;   // the live store
+  Orca_dialect dialect;     // the operator list the VM runs (sim.h)
   Usz *tick_num;            // incremented once per tick body
   Oevent_list *tick_list;   // the VM's events, then sent
   Oevent_list *engine_list; // the CC engine's output: cleared before each
@@ -106,13 +108,13 @@ typedef struct {
 // The shell sends nothing else for the tick.
 void tick_body(Tick_ctx const *ctx, Tick_sink const *sink);
 
-// Clears the marks and the list, then runs the VM once into the list. Sends
-// nothing, ages nothing and never touches the CC engine: the paused re-mark
-// (the preview, on the scratch grid and store) and step-forward use it as
-// well as tick_body.
+// Clears the marks and the list, then runs the VM once into the list, with
+// ctx's store and dialect. Sends nothing, ages nothing and never touches the
+// CC engine: the paused re-mark (the preview, on the scratch grid and store)
+// and step-forward use it as well as tick_body.
 void tick_run_vm(Glyph *restrict gbuffer, Mark *restrict mbuffer, Usz height,
                  Usz width, Usz tick_num, Oevent_list *list, Usz random_seed,
-                 Opstate_store *opstate);
+                 Orca_run_ctx const *ctx);
 
 // Sends a note-off for every sustained note and clears the list. With no
 // sustained notes it sends nothing and touches no buffer. Used on pause, on

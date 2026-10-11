@@ -1,8 +1,8 @@
 #!/bin/sh
 # Builds upstream Orca-c's cli at 9df9786, with bOrca's --events and --seed,
 # into build/upstream/cli (architecture spine AD-21). Its output is what the
-# goldens under tests/expected/examples/upstream/ hold, and what I1 compares
-# `cli --dialect upstream` with.
+# goldens under tests/expected/examples/upstream/ hold, and what
+# tests/upstream/compare.sh compares `cli --dialect upstream` with (I1).
 #
 #   tests/upstream/build-cli.sh
 #
