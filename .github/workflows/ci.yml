@@ -1,8 +1,9 @@
 # bOrca CI (spec item P0.4, architecture decision AD-21).
 #
-# Runs only for spec/borca-fixes: main in this fork holds the JS Orca and
-# keeps no workflow, so workflow_dispatch has no Run button in the web UI;
-# start a manual run with `gh workflow run ci.yml --ref spec/borca-fixes`.
+# Runs for spec/borca-fixes, the working branch, and for main, bOrca's
+# release line from v1.0.0, which moves only at tagged releases; and for v*
+# tags. The JS Orca that main held before v1.0.0 lives on the js-orca branch.
+# Start a manual run with `gh workflow run ci.yml --ref <branch>`.
 #
 # The build and unsigned-char jobs run the same ./tool, tests/run.sh,
 # build/unit_tests and tests/check-*.sh commands a developer runs locally
@@ -15,9 +16,10 @@ name: CI
 
 on:
   push:
-    branches: [spec/borca-fixes]
+    branches: [spec/borca-fixes, main]
+    tags: ['v*']
   pull_request:
-    branches: [spec/borca-fixes]
+    branches: [spec/borca-fixes, main]
   workflow_dispatch:
 
 concurrency:

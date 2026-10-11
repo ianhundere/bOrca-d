@@ -495,8 +495,9 @@ Each `--portmidi` or `--alsa` test build overwrites
 ## CI
 
 `.github/workflows/ci.yml` runs on pushes and pull requests to
-`spec/borca-fixes`; start a manual run with
-`gh workflow run ci.yml --ref spec/borca-fixes`.
+`spec/borca-fixes`, the working branch, and `main`, bOrca's release line
+from `v1.0.0`, and on `v*` tags; start a manual run with
+`gh workflow run ci.yml --ref <branch>`.
 
 - **build** (pinned `ubuntu-24.04` and `ubuntu-24.04-arm`, never `-latest`):
   first checks that `CFLAGS_EXTRA` reaches the compiler, then builds the
